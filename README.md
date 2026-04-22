@@ -1,5 +1,5 @@
 # WavePlayer — v1.0.0
-A standalone voice-controlled media player,
+Universal Desktop Voice-Controlled Media Player,
 
 * recomended to have wallpapers in a ```wallpapers``` folder in ```/Home/Pictures/``` on Linux, or in ```User\Pictures\``` on Windows 
 * use "Mic Threashold" on settings panel to change to trigger level for STT
