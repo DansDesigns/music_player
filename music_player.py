@@ -179,6 +179,8 @@ WALLPAPER_COMMANDS = [
 
 SETTINGS_OPEN_CMDS  = ["open settings","show settings","toggle settings","open system","show system"]
 SETTINGS_CLOSE_CMDS = ["close settings","hide settings","close system","hide system"]
+PLAYLIST_OPEN_CMDS  = ["show playlist","open playlist","toggle playlist"]
+PLAYLIST_CLOSE_CMDS = ["hide playlist","close playlist"]
 
 MEDIA_PLAY_CMDS    = ["play","play music","play media","resume","resume media","resume music","resume playback"]
 MEDIA_PAUSE_CMDS   = ["pause playback","pause music","pause media", "pause"]
@@ -1570,6 +1572,13 @@ class VoskSTT:
         return None
 
     @staticmethod
+    def playlist_command(raw):
+        low=raw.lower().strip()
+        if any(c in low for c in PLAYLIST_OPEN_CMDS):  return "open"
+        if any(c in low for c in PLAYLIST_CLOSE_CMDS): return "close"
+        return None
+
+    @staticmethod
     def help_command(raw) -> Optional[str]:
         low=raw.lower().strip()
         if any(c in low for c in HELP_CLOSE_COMMANDS): return "close"
@@ -2448,7 +2457,7 @@ class PlaylistPanel:
 # ── Main Application ───────────────────────────────────────────────────────────
 
 class WavePlayer:
-    TARGET_FPS = 60
+    TARGET_FPS = 30
 
     def __init__(self, wallpaper_path=None):
         pygame.init()
@@ -2519,6 +2528,7 @@ class WavePlayer:
                                           on_select=self._on_playlist_select)
 
         self._vol_dragging = False
+        self._last_save_t = 0.0   # for periodic playback state saves
         self._stt.start()
         self._tts.start()
         threading.Thread(target=self._ipc_server, daemon=True).start()
@@ -2527,6 +2537,8 @@ class WavePlayer:
     def _tts_level_cb(self, level): self.status.tts_level=level
 
     def _tts_start_cb(self):
+        # Duck music while TTS speaks
+        self._media.set_ducked(True)
         # Mute the STT mic so TTS audio isn't fed back into Vosk
         if not self._stt.muted:
             self._stt.muted = True
@@ -2540,6 +2552,8 @@ class WavePlayer:
             self._wake_timer = None
 
     def _tts_end_cb(self):
+        # Restore music volume after TTS finishes
+        self._media.set_ducked(False)
         if self._tts_auto_muted:
             # Keep mic muted a bit longer to let the speaker ring die down,
             # then re-enable.  TTSEngine already sleeps _MIC_RELEASE_DELAY (1.2s)
@@ -2841,6 +2855,13 @@ class WavePlayer:
         if sc=="open":  self.settings_panel.set_open(True);  self._log_cmd("settings opened"); self._ack(); return
         if sc=="close": self.settings_panel.set_open(False); self._log_cmd("settings closed"); self._ack(); return
 
+        # Playlist panel
+        pc=VoskSTT.playlist_command(low)
+        if pc=="open":
+            if self.settings_panel.open: self.settings_panel.open=False
+            self.playlist_panel.open=True;  self._log_cmd("playlist opened"); self._ack(); return
+        if pc=="close": self.playlist_panel.open=False; self._log_cmd("playlist closed"); self._ack(); return
+
         # Wallpaper
         if VoskSTT.wallpaper_command(low):
             self.wallpaper_browser.open(); self._log_cmd("wallpaper browser"); self._ack(); return
@@ -3002,6 +3023,19 @@ class WavePlayer:
             self.settings_panel.update(dt)
             self.playlist_panel.update(dt)
             self._media.update(dt, self._media_stt_active)
+            # Periodic position save (every 10 s) so position survives crashes too
+            _now = time.time()
+            if _now - self._last_save_t >= 10.0 and self._media.tracks:
+                _cur = self._media.tracks[self._media.current_idx]
+                _pos = (_now - self._media._start_t
+                        if self._media.playing and not self._media.paused
+                           and self._media._video_cap is None
+                        else self._media._position)
+                save_playback(track_path=_cur, position=max(0.0,_pos),
+                              volume=self._media.volume,
+                              shuffle=self._media.shuffle, repeat=self._media.repeat,
+                              folder=self._media._current_folder)
+                self._last_save_t = _now
             # Keep playlist in sync with current track
             if self._media.tracks and len(self._media.tracks) != len(self.playlist_panel._tracks):
                 self.playlist_panel.set_tracks(self._media.tracks, self._media.current_idx)
@@ -3046,8 +3080,12 @@ class WavePlayer:
                     if self.help_panel.open and k==pygame.K_ESCAPE:
                         self.help_panel.set_open(False); continue
                     if self.dictation.handle_key(k): continue
-                    if k==pygame.K_F1: self.settings_panel.toggle()
-                    elif k==pygame.K_F2: self.settings_panel.toggle()  # same panel for now
+                    if k==pygame.K_F1:
+                        if self.playlist_panel.open: self.playlist_panel.open=False
+                        self.settings_panel.toggle()
+                    elif k==pygame.K_F2:
+                        if self.settings_panel.open: self.settings_panel.open=False
+                        self.playlist_panel.toggle()
                     elif ctrl and k==pygame.K_h: self.help_panel.toggle()
                     elif ctrl and k==pygame.K_m: self._toggle_mute()
                     elif ctrl and k==pygame.K_w: self.wallpaper_browser.open()
@@ -3126,13 +3164,27 @@ class WavePlayer:
             self.dictation.draw(self.screen)
 
             pygame.display.flip()
-            self.clock.tick(self.TARGET_FPS)
+            # Yield extra CPU when idle (no animation, no audio, no open panels)
+            _busy = (self._media.playing or
+                     self._tts.speaking or
+                     self.status.stt_level > 0.01 or
+                     self.settings_panel._t > 0.01 or
+                     self.playlist_panel._t > 0.01 or
+                     self.help_panel._t > 0.01 or
+                     self.wallpaper_browser.visible or
+                     self.dictation.visible)
+            self.clock.tick(self.TARGET_FPS if _busy else 10)
 
         # Persist playback state so we can resume next time
         _save_track = self._media.tracks[self._media.current_idx] if self._media.tracks else ""
+        # Compute live position: if playing, derive from _start_t for accuracy
+        if self._media.playing and not self._media.paused and self._media._video_cap is None:
+            _save_pos = time.time() - self._media._start_t
+        else:
+            _save_pos = self._media._position
         save_playback(
             track_path = _save_track,
-            position   = self._media._position,
+            position   = max(0.0, _save_pos),
             volume     = self._media.volume,
             shuffle    = self._media.shuffle,
             repeat     = self._media.repeat,
