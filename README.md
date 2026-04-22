@@ -1,10 +1,11 @@
 # WavePlayer — v1.0.0
 A standalone voice-controlled media player,
 
-made with PyGame-CE, Vosk for STT and pyttsx3 for TTS.
-
+* recomended to have wallpapers in a "wallpapers" folder
+* use "Mic Threashold" on settings panel to change to trigger level for STT
 Features:
 ```
+Made with PyGame-CE 
 Audio (mp3/ogg/wav/flac/m4a/opus)
 Video (mp4/avi/mkv/webm) via pygame + cv2
 Album art / box-art rendered inside the circle
@@ -31,8 +32,9 @@ start listening / unmute mic / listen to me
 
 Key Commands:
 ```
-<CTRL + H> Show Help Popup
+<CTRL + H> Show Help Panel
 <CTRL + W> Wallpaper Picker
 <CTRL + M> Toggle STT Microphone Mute
+<F1> Toggle Settings Panel
 ESC — quit
 ```
