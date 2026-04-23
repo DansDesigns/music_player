@@ -94,8 +94,9 @@ def _detect_ipc_mode():
 
 IPC_CFG = _detect_ipc_mode()
 
-VERSION = "1.0.0"
+VERSION  = "1.0.1"
 APP_NAME = "WavePlayer"
+REPO_URL = "https://github.com/dansdesigns/music_player.git"  # update to your repo URL
 
 # ── Persistent settings ────────────────────────────────────────────────────────
 
@@ -1133,6 +1134,9 @@ class SettingsPanel:
         self._ww_rect    = None   # set during draw
         self._ww_apply_rect = None
         self._date_toggle_rect = None
+        self._update_btn_rect  = None
+        self._update_status    = ""   # "", "checking", "updating", "done", "error"
+        self._update_msg       = ""
 
     def refresh_fonts(self, nf):
         self.fonts=nf
@@ -1163,6 +1167,10 @@ class SettingsPanel:
             self._settings["show_date"] = 0.0 if cur else 1.0
             save_settings(self._settings)
             self._on_settings_change()
+            return True
+        if self._update_btn_rect and self._update_btn_rect.collidepoint(pos):
+            if self._update_status not in ("checking", "updating"):
+                self._run_update()
             return True
         # Wake-word text box — click focuses/unfocuses
         if self._ww_rect and self._ww_rect.collidepoint(pos):
@@ -1233,6 +1241,74 @@ class SettingsPanel:
         self._on_settings_change()
         return True
 
+    def _run_update(self):
+        """Pull latest code from git (or re-clone) in a background thread."""
+        import subprocess, shutil
+        self._update_status = "checking"
+        self._update_msg    = "Checking for updates..."
+        def _do():
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            git_dir    = os.path.join(script_dir, ".git")
+            try:
+                if os.path.isdir(git_dir):
+                    # Already a git repo — just pull
+                    self._update_status = "updating"
+                    self._update_msg    = "Pulling latest changes..."
+                    r = subprocess.run(
+                        ["git", "-C", script_dir, "pull", "--ff-only"],
+                        capture_output=True, text=True, timeout=60)
+                    if r.returncode == 0:
+                        out = r.stdout.strip()
+                        self._update_msg = out if out else "Already up to date."
+                    else:
+                        self._update_msg = (r.stderr.strip() or r.stdout.strip() or "git pull failed")[:80]
+                        self._update_status = "error"; return
+                else:
+                    # Not a git repo — clone into a temp dir then copy files over
+                    self._update_status = "updating"
+                    self._update_msg    = "Cloning repository..."
+                    import tempfile
+                    tmp = tempfile.mkdtemp(prefix="waveplayer_update_")
+                    r = subprocess.run(
+                        ["git", "clone", "--depth=1", REPO_URL, tmp],
+                        capture_output=True, text=True, timeout=120)
+                    if r.returncode != 0:
+                        self._update_msg = (r.stderr.strip() or "Clone failed")[:80]
+                        self._update_status = "error"
+                        shutil.rmtree(tmp, ignore_errors=True); return
+                    self._update_msg = "Copying files..."
+                    for item in os.listdir(tmp):
+                        if item in (".git", ".venv"): continue
+                        src = os.path.join(tmp, item)
+                        dst = os.path.join(script_dir, item)
+                        if os.path.isdir(src):
+                            shutil.copytree(src, dst, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(src, dst)
+                    shutil.rmtree(tmp, ignore_errors=True)
+                    self._update_msg = "Update complete. Restart to apply."
+                # Re-install dependencies if requirements.txt was updated
+                req = os.path.join(script_dir, "requirements.txt")
+                venv_pip = os.path.join(script_dir, ".venv",
+                    "Scripts" if platform.system()=="Windows" else "bin", "pip")
+                if os.path.isfile(req) and os.path.isfile(venv_pip):
+                    self._update_msg = "Updating dependencies..."
+                    subprocess.run([venv_pip, "install", "-q", "-r", req],
+                                   capture_output=True, timeout=120)
+                self._update_status = "done"
+                if "Already up to date" not in self._update_msg and "complete" not in self._update_msg:
+                    self._update_msg = "Done! Restart to apply changes."
+            except FileNotFoundError:
+                self._update_status = "error"
+                self._update_msg    = "git not found. Install git and retry."
+            except subprocess.TimeoutExpired:
+                self._update_status = "error"
+                self._update_msg    = "Timed out. Check your connection."
+            except Exception as e:
+                self._update_status = "error"
+                self._update_msg    = str(e)[:80]
+        threading.Thread(target=_do, daemon=True).start()
+
     def update(self, dt):
         t=1.0 if self.open else 0.0
         self._t=max(0.0,min(1.0,self._t+(t-self._t)*self.ANIM_SPEED*dt))
@@ -1300,6 +1376,38 @@ class SettingsPanel:
         tog_txt=self.fonts["sm"].render("ON" if show_date else "OFF",True,tog_col)
         surface.blit(tog_txt,(tog_rect.centerx-tog_txt.get_width()//2,tog_rect.centery-tog_txt.get_height()//2))
         iy+=tog_h+8
+        # ── Update button ─────────────────────────────────────────────
+        busy = self._update_status in ("checking","updating")
+        done = self._update_status == "done"
+        err  = self._update_status == "error"
+        upd_lbl = self.fonts["sm_b"].render(
+            "Updating..." if busy else ("Updated!" if done else ("Error" if err else "Check for Updates")),
+            True,
+            (*TEXT_DIM,ai) if busy else ((*MEDIA_ACCENT,ai) if done else ((*RED_LITE,ai) if err else (*BLUE_LITE,ai))))
+        upd_h=24; upd_w=pw-pad*2
+        upd_rect=pygame.Rect(x+pad,iy,upd_w,upd_h); self._update_btn_rect=upd_rect
+        upd_bg=(*BLUE_DARK,int(ai*0.5)) if busy else ((*MEDIA_DARK,int(ai*0.7)) if done else ((*RED_MID,int(ai*0.5)) if err else (*BLUE_DARK,int(ai*0.8))))
+        upd_brd=(*TEXT_DIM,int(ai*0.4)) if busy else ((*MEDIA_MID,ai) if done else ((*RED_LITE,int(ai*0.7)) if err else (*BLUE_MID,ai)))
+        draw_rounded_rect_alpha(surface,upd_rect,upd_bg,border_rgba=upd_brd,border_w=1,radius=upd_h//2)
+        surface.blit(upd_lbl,(upd_rect.centerx-upd_lbl.get_width()//2,upd_rect.centery-upd_lbl.get_height()//2))
+        iy+=upd_h+2
+        # Status message
+        if self._update_msg:
+            msg_col=(*RED_LITE,ai) if err else (*TEXT_DIM,ai)
+            # Wrap long messages across two lines
+            max_w=pw-pad*2
+            words=self._update_msg.split(); lines=[]; cur=""
+            for w in words:
+                test=(cur+" "+w).strip()
+                if self.fonts["sm"].size(test)[0]<=max_w: cur=test
+                else:
+                    if cur: lines.append(cur)
+                    cur=w
+            if cur: lines.append(cur)
+            for line in lines[:2]:
+                ms=self.fonts["sm"].render(line,True,msg_col)
+                surface.blit(ms,(x+pad,iy)); iy+=ms.get_height()+1
+        iy+=4
         # sliders (drawn first so log clips above them)
         self._draw_sliders(surface, x, y, pw, ph, a_eff)
         # command log box — sits above the sliders

@@ -12,70 +12,67 @@ if "%INSTALL_DIR:~-1%"=="\" set "INSTALL_DIR=%INSTALL_DIR:~0,-1%"
 echo Install directory: %INSTALL_DIR%
 echo.
 
-:: ── Check for Python ──────────────────────────────────────────────────────────
+:: ── Ensure winget is available (needed to auto-install Python and git) ─────────
+echo ------------------------------
+echo Checking for winget...
+echo ------------------------------
+winget --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo winget not found. Attempting to install App Installer from Microsoft...
+    powershell -NoProfile -Command ^
+      "try {" ^
+      "  $url = 'https://aka.ms/getwinget';" ^
+      "  $out = \"$env:TEMP\AppInstaller.msixbundle\";" ^
+      "  Write-Host 'Downloading App Installer...';" ^
+      "  Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing;" ^
+      "  Write-Host 'Installing App Installer...';" ^
+      "  Add-AppxPackage -Path $out;" ^
+      "  Write-Host 'Done.';" ^
+      "} catch { Write-Host \"Failed: $_\"; exit 1 }"
+    if %errorlevel% neq 0 (
+        echo.
+        echo WARNING: Could not install winget automatically.
+        echo Python and git will need to be installed manually if missing.
+        echo   Python: https://www.python.org/downloads/
+        echo   git:    https://git-scm.com/download/win
+        echo.
+    ) else (
+        winget --version >nul 2>&1
+        if %errorlevel% equ 0 (
+            echo winget is now available.
+        ) else (
+            echo winget installed but not yet on PATH. A restart may be needed.
+        )
+    )
+) else (
+    for /f "tokens=*" %%v in ('winget --version') do echo Found: winget %%v
+)
+echo.
+
+:: ── Check / install Python ─────────────────────────────────────────────────────
 echo ------------------------------
 echo Checking for Python...
 echo ------------------------------
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo Python not found on PATH.
-    echo.
-    echo Attempting to install Python via winget...
-    winget --version >nul 2>&1
-    if %errorlevel% neq 0 (
-        echo winget not found. Attempting to install App Installer from Microsoft...
-        echo.
-        :: Download the App Installer (winget) msixbundle via PowerShell
-        powershell -NoProfile -Command ^
-          "try { " ^
-          "  $url = 'https://aka.ms/getwinget'; " ^
-          "  $out = "$env:TEMP\AppInstaller.msixbundle"; " ^
-          "  Write-Host 'Downloading App Installer...'; " ^
-          "  Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing; " ^
-          "  Write-Host 'Installing App Installer...'; " ^
-          "  Add-AppxPackage -Path $out; " ^
-          "  Write-Host 'App Installer installed successfully.'; " ^
-          "} catch { Write-Host "Failed: $_"; exit 1 }"
-        if %errorlevel% neq 0 (
-            echo.
-            echo ERROR: Could not install winget automatically.
-            echo Please install Python 3.10 or later manually from:
-            echo   https://www.python.org/downloads/
-            echo Make sure to tick "Add Python to PATH" during installation.
-            echo Then re-run this installer.
-            pause
-            exit /b 1
-        )
-        :: Verify winget is now available
-        winget --version >nul 2>&1
-        if %errorlevel% neq 0 (
-            echo.
-            echo App Installer was installed but winget is still not on PATH.
-            echo Please restart your computer and re-run this installer.
-            pause
-            exit /b 1
-        )
-        echo winget is now available.
-    )
+    echo Python not found. Installing via winget...
     winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements
     if %errorlevel% neq 0 (
         echo.
-        echo ERROR: Automatic Python installation failed.
-        echo Please install Python manually from https://www.python.org/downloads/
+        echo ERROR: Could not install Python automatically.
+        echo Please install Python 3.10+ manually from https://www.python.org/downloads/
         echo Make sure to tick "Add Python to PATH" during installation.
         pause
         exit /b 1
     )
-    echo Python installed. Refreshing environment...
-    :: Refresh PATH so python is available in this session
     for /f "tokens=*" %%i in ('where python 2^>nul') do set "PYTHON_EXE=%%i"
     if not defined PYTHON_EXE (
         echo.
-        echo Python was installed but cannot be found on PATH yet.
-        echo Please close this window, open a new Command Prompt, and re-run the installer.
+        echo Python installed but not yet on PATH. Please open a new Command Prompt and re-run.
         pause
         exit /b 1
     )
+    echo Python installed.
 ) else (
     for /f "tokens=*" %%v in ('python --version') do echo Found: %%v
 )
@@ -101,12 +98,38 @@ if %PY_MAJOR% equ 3 if %PY_MINOR% lss 10 (
 :: ── Check venv module is available ────────────────────────────────────────────
 python -c "import venv" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo ERROR: Python venv module is not available.
-    echo On some systems you may need to install it separately.
-    echo Try: pip install virtualenv
+    echo ERROR: Python venv module not available. Try: pip install virtualenv
     pause
     exit /b 1
 )
+
+:: ── Check / install git ────────────────────────────────────────────────────────
+echo ------------------------------
+echo Checking for git...
+echo ------------------------------
+git --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo git not found. Installing via winget...
+    winget install -e --id Git.Git --accept-source-agreements --accept-package-agreements
+    if %errorlevel% neq 0 (
+        echo.
+        echo ERROR: Could not install git automatically.
+        echo Please install git manually from https://git-scm.com/download/win
+        pause
+        exit /b 1
+    )
+    for /f "tokens=*" %%i in ('where git 2^>nul') do set "GIT_EXE=%%i"
+    if not defined GIT_EXE (
+        echo.
+        echo git installed but not yet on PATH. Please open a new Command Prompt and re-run.
+        pause
+        exit /b 1
+    )
+    echo git installed.
+) else (
+    for /f "tokens=*" %%v in ('git --version') do echo Found: %%v
+)
+echo.
 
 :: ── Create virtual environment ────────────────────────────────────────────────
 echo ------------------------------
