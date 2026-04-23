@@ -3131,6 +3131,9 @@ class WavePlayer:
                     self._media._title_gap=ly["title_gap"]; self._media._time_gap=ly["time_gap"]
                     self._media._ctrl_gap=ly["ctrl_gap"]; self._media._bar_h=ly["bar_h"]
                     self._media._screen_h=ly["screen_h"]
+                    self.dictation.sw=self.W; self.dictation.sh=self.H
+                    self.dictation.circle_cx=_wave_cx; self.dictation.circle_cy=_wave_cy
+                    self.dictation.circle_r=_wave_r
                     self.settings_panel.w=self.W; self.settings_panel.h=self.H
                     self.settings_panel._bar_h=ly["bar_h"]; self.settings_panel._panel_w=ly["panel_w"]
                     self.playlist_panel.sw=self.W; self.playlist_panel.sh=self.H
