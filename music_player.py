@@ -974,7 +974,7 @@ class HelpPanel:
         bh=self._bar_h; pw=self._panel_w
         ph=self.sh-bh*2-40
         # Slide in from RIGHT (mirror of settings which slides from left)
-        x=int(self.sw+pw+20 - anim*(pw+20)); x=max(self.sw-pw-20, x)
+        x=int(self.sw + anim*(-(pw+20))); x=max(self.sw-pw-20, x)
         y=bh+20
         self._panel_rect=pygame.Rect(x,y,pw,ph)
         draw_rounded_rect_alpha(surface,self._panel_rect,(12,18,30,int(255*a_eff)),
@@ -2543,11 +2543,9 @@ class WavePlayer:
     def __init__(self, wallpaper_path=None):
         pygame.init()
         pygame.display.set_caption(APP_NAME)
-        pygame.display.set_mode((0,0), pygame.FULLSCREEN | pygame.NOFRAME)
-        info=pygame.display.Info()
-        self.W=info.current_w; self.H=info.current_h
-        self.screen=pygame.display.set_mode((self.W,self.H), pygame.FULLSCREEN|pygame.NOFRAME)
-        self._is_fullscreen = True
+        self.screen=pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
+        self.W, self.H = self.screen.get_size()
+        self._is_fullscreen = False
         self.clock=pygame.time.Clock(); self.running=True
 
         self._settings=load_settings()
