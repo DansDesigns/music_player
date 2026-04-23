@@ -23,14 +23,39 @@ if %errorlevel% neq 0 (
     echo Attempting to install Python via winget...
     winget --version >nul 2>&1
     if %errorlevel% neq 0 (
+        echo winget not found. Attempting to install App Installer from Microsoft...
         echo.
-        echo ERROR: winget is not available on this system.
-        echo Please install Python 3.10 or later manually from:
-        echo   https://www.python.org/downloads/
-        echo Make sure to tick "Add Python to PATH" during installation.
-        echo Then re-run this installer.
-        pause
-        exit /b 1
+        :: Download the App Installer (winget) msixbundle via PowerShell
+        powershell -NoProfile -Command ^
+          "try { " ^
+          "  $url = 'https://aka.ms/getwinget'; " ^
+          "  $out = "$env:TEMP\AppInstaller.msixbundle"; " ^
+          "  Write-Host 'Downloading App Installer...'; " ^
+          "  Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing; " ^
+          "  Write-Host 'Installing App Installer...'; " ^
+          "  Add-AppxPackage -Path $out; " ^
+          "  Write-Host 'App Installer installed successfully.'; " ^
+          "} catch { Write-Host "Failed: $_"; exit 1 }"
+        if %errorlevel% neq 0 (
+            echo.
+            echo ERROR: Could not install winget automatically.
+            echo Please install Python 3.10 or later manually from:
+            echo   https://www.python.org/downloads/
+            echo Make sure to tick "Add Python to PATH" during installation.
+            echo Then re-run this installer.
+            pause
+            exit /b 1
+        )
+        :: Verify winget is now available
+        winget --version >nul 2>&1
+        if %errorlevel% neq 0 (
+            echo.
+            echo App Installer was installed but winget is still not on PATH.
+            echo Please restart your computer and re-run this installer.
+            pause
+            exit /b 1
+        )
+        echo winget is now available.
     )
     winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements
     if %errorlevel% neq 0 (
