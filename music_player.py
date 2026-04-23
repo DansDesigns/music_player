@@ -111,6 +111,8 @@ _SETTINGS_DEFAULTS = {
     "tts_rate":      175,
     "tts_volume":    1.0,
     "wake_word":     "",
+    "show_date":     1.0,
+    "mic_muted":     0.0,
 }
 
 # Keys whose values should be kept as strings rather than cast to float
@@ -342,7 +344,11 @@ def _ffind(paths):
         if p and os.path.isfile(p): return p
     return None
 
+_FONT_PATH_REG  = None   # set by load_fonts for dynamic sizing
+_FONT_PATH_BOLD = None
+
 def load_fonts(font_name: str = "") -> dict:
+    global _FONT_PATH_REG, _FONT_PATH_BOLD
     rp = bp = None
     if font_name:
         sp = pygame.font.match_font(font_name)
@@ -350,6 +356,7 @@ def load_fonts(font_name: str = "") -> dict:
             rp = bp = sp
     if rp is None:
         rp = _ffind(_FONT_REG); bp = _ffind(_FONT_BOLD) or rp; rp = rp or bp
+    _FONT_PATH_REG = rp; _FONT_PATH_BOLD = bp
     def mk(path, size):
         return pygame.font.Font(path, size) if path else pygame.font.Font(None, size)
     return {
@@ -905,7 +912,6 @@ _HELP_VOICE_SECTIONS = [
         ("close help",                   "Close this panel"),
         ("stop listening / mute mic",    "Mute microphone"),
         ("start listening / unmute mic", "Unmute microphone"),
-        ("ESC",                          "Quit application"),
     ]),
 ]
 
@@ -914,7 +920,6 @@ _HELP_KEY_SECTIONS = [
         ("F1",          "Toggle settings panel"),
         ("F2",          "Toggle command log panel"),
         ("CTRL+H",      "Toggle help panel"),
-        ("CTRL+P",      "Toggle media mode / normal"),
         ("CTRL+M",      "Toggle mic mute"),
         ("CTRL+W",      "Open wallpaper browser"),
         ("SPACE",       "Play / Pause"),
@@ -929,11 +934,12 @@ _HELP_KEY_SECTIONS = [
 
 class HelpPanel:
     ANIM_SPEED=10.0; RADIUS=12; COL_PAD=28; ROW_H=22
-    CAT_GAP=10; HDR_H=44; BOTTOM_PAD=18; SCROLL_SPD=3
+    CAT_GAP=10; HDR_H=44; BOTTOM_PAD=32; SCROLL_SPD=3
 
-    def __init__(self, sw: int, sh: int, fonts: dict, bar_h: int=None):
+    def __init__(self, sw: int, sh: int, fonts: dict, bar_h: int=None, panel_w: int=None):
         self.sw=sw; self.sh=sh; self.fonts=fonts
         self._bar_h = bar_h or BAR_HEIGHT
+        self._panel_w = panel_w or 340
         self.open=False; self._t=0.0; self._scroll=0; self._max_scroll=0
         self._drag=False; self._panel_rect=None
         self._voice_rows=self._build_rows(_HELP_VOICE_SECTIONS)
@@ -963,43 +969,43 @@ class HelpPanel:
 
     def draw(self, surface, panel_alpha: float=1.0):
         if self._t<0.005: self._panel_rect=None; return
-        a_eff=self._t*panel_alpha; ai=int(255*a_eff); f=self.fonts; lh=self.ROW_H; pad=self.COL_PAD
-        panel_w=min(self.sw-80,980); panel_x=(self.sw-panel_w)//2
-        voice_h=self._col_height(self._voice_rows,lh); key_h=self._col_height(self._key_rows,lh)
-        content_h=max(voice_h,key_h); self._content_h=content_h
-        max_panel_h=self.sh-self._bar_h*2-60
-        visible_h=min(content_h+self.HDR_H+self.BOTTOM_PAD,max_panel_h)
-        panel_y=self._bar_h+int((visible_h+20)*(self._t-1.0))
-        panel_y=max(self._bar_h-visible_h-4,panel_y)
-        self._panel_rect=pygame.Rect(panel_x,panel_y,panel_w,visible_h)
-        self._max_scroll=max(0,content_h-(visible_h-self.HDR_H-self.BOTTOM_PAD))
+        anim=self._t; a_eff=anim*panel_alpha; ai=int(255*a_eff)
+        f=self.fonts; lh=self.ROW_H; pad=self.COL_PAD
+        bh=self._bar_h; pw=self._panel_w
+        ph=self.sh-bh*2-40
+        # Slide in from RIGHT (mirror of settings which slides from left)
+        x=int(self.sw+pw+20 - anim*(pw+20)); x=max(self.sw-pw-20, x)
+        y=bh+20
+        self._panel_rect=pygame.Rect(x,y,pw,ph)
         draw_rounded_rect_alpha(surface,self._panel_rect,(12,18,30,int(255*a_eff)),
             border_rgba=(*HELP_ACCENT,int(255*a_eff)),border_w=1,radius=self.RADIUS)
-        title_rect=pygame.Rect(panel_x,panel_y,panel_w,self.HDR_H)
-        draw_rounded_rect_alpha(surface,title_rect,(18,32,50,int(255*a_eff)),
+        # Header
+        draw_rounded_rect_alpha(surface,pygame.Rect(x,y,pw,self.HDR_H),(18,32,50,int(255*a_eff)),
             border_rgba=(*HELP_ACCENT,int(255*a_eff)),border_w=0,radius=(self.RADIUS,self.RADIUS,0,0))
         icon_s=f["md_b"].render("?",True,(*HELP_ACCENT,ai))
-        surface.blit(icon_s,(panel_x+16,panel_y+(self.HDR_H-icon_s.get_height())//2))
-        title_s=f["lg_b"].render("SPEECH & KEYBOARD REFERENCE",True,(*HELP_HDR_COL,ai))
-        surface.blit(title_s,(panel_x+40,panel_y+(self.HDR_H-title_s.get_height())//2))
-        hint_s=f["sm"].render("CTRL+H  /  'close help'  /  ESC",True,(*TEXT_DIM,int(ai*0.7)))
-        surface.blit(hint_s,(panel_x+panel_w-hint_s.get_width()-14,panel_y+(self.HDR_H-hint_s.get_height())//2))
-        sep_y=panel_y+self.HDR_H
-        pygame.draw.line(surface,(*HELP_ACCENT,int(80*a_eff)),(panel_x+10,sep_y),(panel_x+panel_w-10,sep_y),1)
-        content_area=pygame.Rect(panel_x+1,sep_y+1,panel_w-2,visible_h-self.HDR_H-2)
+        surface.blit(icon_s,(x+16,y+(self.HDR_H-icon_s.get_height())//2))
+        title_s=f["md_b"].render("Help",True,(*HELP_HDR_COL,ai))
+        surface.blit(title_s,(x+40,y+(self.HDR_H-title_s.get_height())//2))
+        hint_s=f["sm"].render("CTRL+H / 'close help'",True,(*TEXT_DIM,int(ai*0.7)))
+        surface.blit(hint_s,(x+pw-hint_s.get_width()-14,y+(self.HDR_H-hint_s.get_height())//2))
+        sep_y=y+self.HDR_H
+        pygame.draw.line(surface,(*HELP_ACCENT,int(80*a_eff)),(x+10,sep_y),(x+pw-10,sep_y),1)
+        # Scrollable content — both columns stacked vertically to fit narrow panel
+        content_area=pygame.Rect(x+1,sep_y+1,pw-2,ph-self.HDR_H-2)
         try: clip=surface.subsurface(content_area)
         except ValueError: return
-        col_w=(panel_w-pad*3)//2; col_x_left=pad; col_x_right=pad*2+col_w
+        voice_h=self._col_height(self._voice_rows,lh); key_h=self._col_height(self._key_rows,lh)
+        content_h=voice_h+key_h+lh; self._content_h=content_h
+        self._max_scroll=max(0,content_h-(content_area.height))
+        col_w=pw-pad*2
         base_y=self.BOTTOM_PAD//2-self._scroll
-        self._draw_column(clip,f,self._voice_rows,col_x_left, base_y,col_w,ai,lh,header="VOICE COMMANDS")
-        self._draw_column(clip,f,self._key_rows,  col_x_right,base_y,col_w,ai,lh,header="KEYBOARD SHORTCUTS")
-        div_x=col_x_left+col_w+pad//2-1; div_h=content_area.height-8
-        pygame.draw.line(clip,(*HELP_DIVIDER,int(180*a_eff)),(div_x,4),(div_x,div_h),1)
+        self._draw_column(clip,f,self._voice_rows,pad,base_y,col_w,ai,lh,header="VOICE COMMANDS")
+        self._draw_column(clip,f,self._key_rows,  pad,base_y+voice_h,col_w,ai,lh,header="KEYBOARD SHORTCUTS")
         if self._max_scroll>0:
-            sb_h=content_area.height-8; tb_h=max(20,int(sb_h*(content_area.height/max(1,content_h))))
+            sb_h=content_area.height-8; tb_h=max(20,int(sb_h*content_area.height/max(1,content_h)))
             tb_y=int((self._scroll/max(1,self._max_scroll))*(sb_h-tb_h))+4
-            pygame.draw.rect(clip,(*BLUE_DARK,int(ai*0.4)),(panel_w-8,4,4,sb_h),border_radius=2)
-            pygame.draw.rect(clip,(*HELP_ACCENT,ai),       (panel_w-8,tb_y,4,tb_h),border_radius=2)
+            pygame.draw.rect(clip,(*BLUE_DARK,int(ai*0.4)),(pw-8,4,4,sb_h),border_radius=2)
+            pygame.draw.rect(clip,(*HELP_ACCENT,ai),       (pw-8,tb_y,4,tb_h),border_radius=2)
 
     @staticmethod
     def _build_rows(sections):
@@ -1126,6 +1132,7 @@ class SettingsPanel:
         self._ww_focused = False
         self._ww_rect    = None   # set during draw
         self._ww_apply_rect = None
+        self._date_toggle_rect = None
 
     def refresh_fonts(self, nf):
         self.fonts=nf
@@ -1148,6 +1155,12 @@ class SettingsPanel:
         if self._ww_apply_rect and self._ww_apply_rect.collidepoint(pos):
             self._ww_focused = False
             self._settings["wake_word"] = self._ww_text.strip()
+            save_settings(self._settings)
+            self._on_settings_change()
+            return True
+        if self._date_toggle_rect and self._date_toggle_rect.collidepoint(pos):
+            cur = bool(self._settings.get("show_date", 1.0))
+            self._settings["show_date"] = 0.0 if cur else 1.0
             save_settings(self._settings)
             self._on_settings_change()
             return True
@@ -1274,16 +1287,34 @@ class SettingsPanel:
         apls=self.fonts["sm"].render("SET",True,(*MEDIA_ACCENT,ai))
         surface.blit(apls,(apply_rect.centerx-apls.get_width()//2,apply_rect.centery-apls.get_height()//2))
         iy+=box_h+10
-        # command log box
-        self._draw_log_section(surface, x, iy, pw, ph-(iy-y), a_eff)
-        # sliders
+        # ── Show date toggle ──────────────────────────────────────────
+        show_date = bool(self._settings.get("show_date", 1.0))
+        tog_lbl = self.fonts["sm"].render("SHOW DATE", True, (*TEXT_DIM, ai))
+        surface.blit(tog_lbl, (x+pad, iy))
+        tog_w=42; tog_h=20; tog_x=x+pw-pad-tog_w; tog_y=iy
+        tog_rect=pygame.Rect(tog_x,tog_y,tog_w,tog_h); self._date_toggle_rect=tog_rect
+        tog_bg=(*MEDIA_MID,int(ai*0.9)) if show_date else (*BLUE_DARK,int(ai*0.7))
+        tog_brd=(*MEDIA_ACCENT,ai) if show_date else (*BLUE_MID,int(ai*0.6))
+        draw_rounded_rect_alpha(surface,tog_rect,tog_bg,border_rgba=tog_brd,border_w=1,radius=tog_h//2)
+        tog_col=(*MEDIA_ACCENT,ai) if show_date else (*TEXT_DIM,ai)
+        tog_txt=self.fonts["sm"].render("ON" if show_date else "OFF",True,tog_col)
+        surface.blit(tog_txt,(tog_rect.centerx-tog_txt.get_width()//2,tog_rect.centery-tog_txt.get_height()//2))
+        iy+=tog_h+8
+        # sliders (drawn first so log clips above them)
         self._draw_sliders(surface, x, y, pw, ph, a_eff)
+        # command log box — sits above the sliders
+        slider_rows=3; lh_s=self.fonts["sm"].get_height()
+        slider_block=(self.SLIDER_H+lh_s+6+14)*slider_rows+20
+        log_bottom=y+ph-slider_block-8
+        log_avail=max(0, log_bottom-iy)
+        self._draw_log_section(surface, x, iy, pw, log_avail, a_eff)
 
     def _draw_log_section(self, surface, px, py, pw, ph, a):
-        ai=int(255*a); PAD=10; out_h=self.OUTPUT_H; hdr_h=self.OUTPUT_HDR_H
-        box_y=py+ph-out_h-hdr_h-8-((self.SLIDER_H+self.fonts["sm"].get_height()+6+14)*3+20)
-        box_x=px+PAD; box_w=pw-PAD*2
-        if box_y<py: box_y=py
+        if ph < 40: return   # not enough room
+        ai=int(255*a); PAD=10; hdr_h=self.OUTPUT_HDR_H
+        out_h=max(0, ph-hdr_h-8)   # fill available space
+        if out_h < 20: return
+        box_y=py; box_x=px+PAD; box_w=pw-PAD*2
         draw_rounded_rect_alpha(surface,pygame.Rect(box_x,box_y,box_w,hdr_h),
             (10,20,35,int(ai*0.7)),border_rgba=(*MEDIA_MID,int(ai*1.0)),border_w=1,radius=(self.RADIUS,self.RADIUS,0,0))
         pygame.draw.line(surface,(*MEDIA_LITE,ai),(box_x+2,box_y+hdr_h-1),(box_x+box_w-4,box_y+hdr_h-1),1)
@@ -1371,19 +1402,38 @@ _settings_btn_rect:    Optional[pygame.Rect] = None
 _fullscreen_btn_rect:  Optional[pygame.Rect] = None
 _playlist_btn_rect:    Optional[pygame.Rect] = None
 _stats_rect:           Optional[pygame.Rect] = None
+_mute_pill_rect:       Optional[pygame.Rect] = None
 
 def draw_top_bar(surface, fonts, status, w, h, bar_alpha=1.0, bar_h=None):
     bh = bar_h or BAR_HEIGHT
     bba=int(255*bar_alpha); bg=MEDIA_BAR_BG
     bs=pygame.Surface((w,bh),pygame.SRCALPHA); bs.fill((*bg,bba)); surface.blit(bs,(0,0))
     dn=fonts["md"].render(APP_NAME,True,TEXT_BRIGHT); surface.blit(dn,(16,(bh-dn.get_height())//2))
-    ts=fonts["lg"].render(status.time_str,True,TEXT_BRIGHT); surface.blit(ts,(w//2-ts.get_width()//2,2))
-    ds=fonts["sm"].render(status.date_str,True,TEXT_BRIGHT); surface.blit(ds,(w//2-ds.get_width()//2,bh-ds.get_height()-2))
+    show_date = bool(getattr(status, "show_date", True))
+    pad = max(2, int(bh * 0.12))
+    if show_date:
+        gap = max(1, int(bh * 0.04))
+        avail = bh - pad * 2 - gap
+        time_sz = max(8, int(avail * 0.60))
+        date_sz = max(7, int(avail * 0.40))
+        tf = pygame.font.Font(_FONT_PATH_BOLD, time_sz)
+        df = pygame.font.Font(_FONT_PATH_REG,  date_sz)
+        ts = tf.render(status.time_str, True, TEXT_BRIGHT)
+        ds = df.render(status.date_str, True, TEXT_BRIGHT)
+        ty = pad
+        surface.blit(ts,(w//2-ts.get_width()//2, ty))
+        surface.blit(ds,(w//2-ds.get_width()//2, ty+ts.get_height()+gap))
+    else:
+        # Fill most of the bar height, then truly centre the rendered surface
+        time_sz = max(8, int(bh * 0.72))
+        tf = pygame.font.Font(_FONT_PATH_BOLD, time_sz)
+        ts = tf.render(status.time_str, True, TEXT_BRIGHT)
+        surface.blit(ts,(w//2-ts.get_width()//2, (bh-ts.get_height())//2))
     ver_s=fonts["sm"].render(f"v{VERSION}",True,TEXT_DIM)
     surface.blit(ver_s,(w-ver_s.get_width()-16,(bh-ver_s.get_height())//2))
 
 def draw_bottom_bar(surface, fonts, status, w, h, bar_alpha=1.0, bar_h=None):
-    global _mode_pill_rect, _settings_btn_rect, _fullscreen_btn_rect, _playlist_btn_rect, _stats_rect
+    global _mode_pill_rect, _settings_btn_rect, _fullscreen_btn_rect, _playlist_btn_rect, _stats_rect, _mute_pill_rect
     bh = bar_h or BAR_HEIGHT
     bba=int(255*bar_alpha); by=h-bh
     bg=MEDIA_BAR_BG
@@ -1398,7 +1448,7 @@ def draw_bottom_bar(surface, fonts, status, w, h, bar_alpha=1.0, bar_h=None):
     surface.blit(set_lbl,(set_x+px2,set_y+py2))
     # ── Fullscreen toggle button ───────────────────────────────────────────────
     is_fs=bool(pygame.display.get_surface().get_flags() & pygame.FULLSCREEN)
-    fs_str="⛶  Windowed" if is_fs else "⛶  Fullscreen"
+    fs_str="W  Windowed" if is_fs else "F  Fullscreen"
     fs_lbl=fonts["sm_b"].render(fs_str,True,TEXT_BRIGHT)
     fs_pw=fs_lbl.get_width()+px2*2; fs_ph=fs_lbl.get_height()+py2*2
     fs_x=set_x+set_pw+8; fs_y=by+(bh-fs_ph)//2
@@ -1406,7 +1456,7 @@ def draw_bottom_bar(surface, fonts, status, w, h, bar_alpha=1.0, bar_h=None):
     draw_rounded_rect_alpha(surface,fs_rect,(20,35,55,200),border_rgba=(*BLUE_MID,180),border_w=1,radius=fs_ph//2)
     surface.blit(fs_lbl,(fs_x+px2,fs_y+py2))
     # ── Playlist button ───────────────────────────────────────────────────────
-    pl_lbl=fonts["sm_b"].render("☰  Playlist",True,TEXT_BRIGHT)
+    pl_lbl=fonts["sm_b"].render("=  Playlist",True,TEXT_BRIGHT)
     pl_pw=pl_lbl.get_width()+px2*2; pl_ph=pl_lbl.get_height()+py2*2
     pl_x=fs_x+fs_pw+8; pl_y=by+(bh-pl_ph)//2
     pl_rect=pygame.Rect(pl_x,pl_y,pl_pw,pl_ph); _playlist_btn_rect=pl_rect
@@ -1430,24 +1480,26 @@ def draw_bottom_bar(surface, fonts, status, w, h, bar_alpha=1.0, bar_h=None):
         draw_rounded_rect_alpha(surface,pygame.Rect(tpx,tpy,tpw,tph),
             (*BLUE_DARK,200),border_rgba=(*BLUE_MID,180),border_w=1,radius=tph//2)
         surface.blit(tl,(tpx+px2,tpy+py2))
-    # Mute pill
-    if status.stt_muted:
-        label=fonts["sm_b"].render("[MIC MUTED]",True,WHITE)
-        mx2,my2=14,5; mw=label.get_width()+mx2*2; mh=label.get_height()+my2*2
-        draw_rounded_rect_alpha(surface,pygame.Rect(w//2-mw//2,by+(bh-mh)//2,mw,mh),
-            (*RED_MID,210),border_rgba=(*RED_LITE,180),border_w=1,radius=mh//2)
-        surface.blit(label,(w//2-mw//2+mx2,by+(bh-mh)//2+my2))
-    else:
-        # Show track info or media status in centre
-        act=status.media_status[:60] if status.media_status else ""
-        ma=fonts["sm"].render(act,True,MEDIA_ACCENT)
-        surface.blit(ma,(w//2-ma.get_width()//2,by+(bh-ma.get_height())//2))
-    # System stats (throttled — psutil cpu_percent is expensive every frame)
+    # Track status in centre always
+    act=status.media_status[:60] if status.media_status else ""
+    ma=fonts["sm"].render(act,True,MEDIA_ACCENT)
+    surface.blit(ma,(w//2-ma.get_width()//2,by+(bh-ma.get_height())//2))
+    # System stats with battery (throttled)
     if PSUTIL_OK:
         try:
             now_t = time.time()
-            if now_t - getattr(status, "_stats_t", 0) >= 2.0:
-                status._stats_str = f"CPU {psutil.cpu_percent(interval=None):.0f}%  RAM {psutil.virtual_memory().percent:.0f}%"
+            if now_t - getattr(status, "_stats_t", 0) >= 4.0:
+                cpu = psutil.cpu_percent(interval=None)
+                ram = psutil.virtual_memory().percent
+                bat_str = ""
+                try:
+                    bat = psutil.sensors_battery()
+                    if bat is not None:
+                        pct = int(bat.percent)
+                        chg = "+" if bat.power_plugged else "-"
+                        bat_str = f"  BAT {pct}%{chg}"
+                except Exception: pass
+                status._stats_str = f"CPU {cpu:.0f}%  RAM {ram:.0f}%{bat_str}"
                 status._stats_t   = now_t
             st = getattr(status, "_stats_str", "CPU --%  RAM --%")
         except Exception: st="--"
@@ -1461,6 +1513,19 @@ def draw_bottom_bar(surface, fonts, status, w, h, bar_alpha=1.0, bar_h=None):
     _stats_rect=_stats_rect_local
     draw_rounded_rect_alpha(surface,_stats_rect_local,(20,35,55,160),border_rgba=(*BLUE_DARK,120),border_w=1,radius=_stats_rect_local.height//2)
     surface.blit(ss,(stats_x+stats_pad,by+(bh-ss.get_height())//2))
+    # Mute pill — always visible, right side left of stats, clickable toggle
+    global _mute_pill_rect
+    if status.stt_muted:
+        mic_lbl=fonts["sm_b"].render("MIC OFF",True,WHITE)
+        mic_bg=(*RED_MID,210); mic_brd=(*RED_LITE,180)
+    else:
+        mic_lbl=fonts["sm_b"].render("MIC ON",True,MEDIA_ACCENT)
+        mic_bg=(10,30,18,160); mic_brd=(*MEDIA_MID,140)
+    mx2,my2=10,3; mw=mic_lbl.get_width()+mx2*2; mh=mic_lbl.get_height()+my2*2
+    mute_x=stats_x-mw-8; mute_y=by+(bh-mh)//2
+    mute_rect=pygame.Rect(mute_x,mute_y,mw,mh); _mute_pill_rect=mute_rect
+    draw_rounded_rect_alpha(surface,mute_rect,mic_bg,border_rgba=mic_brd,border_w=1,radius=mh//2)
+    surface.blit(mic_lbl,(mute_x+mx2,mute_y+my2))
 
 
 # ── App status dataclass ───────────────────────────────────────────────────────
@@ -1475,6 +1540,7 @@ class AppStatus:
     stt_muted:    bool  = False
     wake_active:  bool  = False
     media_status: str   = "No media"
+    show_date:    bool  = True
 
 
 # ── Vosk STT ───────────────────────────────────────────────────────────────────
@@ -1716,6 +1782,19 @@ class MediaPlayerMode:
         threading.Thread(target=self._bg_scan,daemon=True).start()
 
     def refresh_fonts(self, fonts: dict): self.fonts=fonts
+
+    def update_layout(self, cx: int, cy: int, r: int, layout: dict):
+        """Update geometry for a new screen size without touching playback."""
+        self.cx=cx; self.cy=cy; self.r=r
+        ly=layout
+        self.CTRL_BTN_W  = ly.get("btn_w",  self.CTRL_BTN_W)
+        self.CTRL_BTN_H  = ly.get("btn_h",  self.CTRL_BTN_H)
+        self.VOL_BAR_H   = ly.get("vol_bar_h", self.VOL_BAR_H)
+        self._title_gap  = ly.get("title_gap", self._title_gap)
+        self._time_gap   = ly.get("time_gap",  self._time_gap)
+        self._ctrl_gap   = ly.get("ctrl_gap",  self._ctrl_gap)
+        self._bar_h      = ly.get("bar_h",     self._bar_h)
+        self._screen_h   = ly.get("screen_h",  self._screen_h)
 
     # ── media controls ─────────────────────────────────────────────────────────────
 
@@ -2182,20 +2261,22 @@ class MediaPlayerMode:
             inner_pts.append((cx + dist_inner * math.cos(angle),
                                cy + dist_inner * math.sin(angle)))
 
-        # Draw filled wave band (outer ring → inner ring)
+        # Draw filled wave band (outer ring → inner ring, fully closed)
         avg_level = sum(self._bars) / max(1, n)
         fill_alpha = int(60 + avg_level * 80)
         fill_surf = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
         fill_surf.fill((0, 0, 0, 0))
-        # Translate points to surface-local coords
         def to_local(pts): return [(x - (cx - r), y - (cy - r)) for x, y in pts]
-        poly = to_local(outer_pts) + to_local(list(reversed(inner_pts)))
+        # Close the ring: outer forward + inner backward, then back to outer[0]
+        outer_loc = to_local(outer_pts)
+        inner_loc = to_local(inner_pts)
+        poly = outer_loc + list(reversed(inner_loc)) + [outer_loc[0]]
         if len(poly) >= 3:
             fill_col = lerp_col(MEDIA_MID, MEDIA_ACCENT, avg_level)
             pygame.draw.polygon(fill_surf, (*fill_col, fill_alpha), poly)
         surface.blit(fill_surf, (cx - r, cy - r))
 
-        # Draw a glowing line along the outer wave edge
+        # Draw a glowing line along the outer wave edge (closed loop)
         for j in range(total_pts):
             j2 = (j + 1) % total_pts
             p1 = (int(outer_pts[j][0]),  int(outer_pts[j][1]))
@@ -2261,7 +2342,7 @@ class MediaPlayerMode:
         draw_circle_alpha(surface, (220, 255, 230, 200), (thumb_x, thumb_y), 4)
         # label
         vol_pct = int(self.volume * 100)
-        vols = self.fonts["sm"].render(f"Vol {vol_pct}%", True, TEXT_DIM)
+        vols = self.fonts["sm"].render(f"Vol {vol_pct}%", True, TEXT_BRIGHT)
         surface.blit(vols, (cx - vols.get_width()//2, vol_y + self.VOL_BAR_H + 2))
         # store hit rect for click handling
         self._vol_bar_rect = pygame.Rect(bar_x - 4, vol_y, bar_w + 8, self.VOL_BAR_H)
@@ -2520,7 +2601,7 @@ class WavePlayer:
         # Log panel (F2) — command log on left side
         self.log_panel_open=False; self._log_panel_t=0.0
 
-        self.help_panel=HelpPanel(self.W, self.H, self.fonts, bar_h=ly["bar_h"])
+        self.help_panel=HelpPanel(self.W, self.H, self.fonts, bar_h=ly["bar_h"], panel_w=ly["panel_w"])
         self.wallpaper_browser=WallpaperBrowser(self.W, self.H, self.fonts,
                                                 on_select=self._on_wallpaper_select,
                                                 bar_h=ly["bar_h"])
@@ -2531,6 +2612,10 @@ class WavePlayer:
         self._last_save_t = 0.0   # for periodic playback state saves
         self._stt.start()
         self._tts.start()
+        # Restore persisted mute state
+        if bool(self._settings.get("mic_muted", 0.0)):
+            self._stt.muted = True
+            self.status.stt_muted = True
         threading.Thread(target=self._ipc_server, daemon=True).start()
 
     # ── TTS callbacks ──────────────────────────────────────────────────────────
@@ -2586,6 +2671,9 @@ class WavePlayer:
     def _toggle_mute(self):
         self._stt.muted=not self._stt.muted; self.status.stt_muted=self._stt.muted
         self._log_cmd("mic muted" if self._stt.muted else "mic unmuted")
+        # Persist mute state so it survives restarts
+        self._settings["mic_muted"]=1.0 if self._stt.muted else 0.0
+        save_settings(self._settings)
         if self._stt.muted and self.dictation.visible: self.dictation.dismiss()
 
     def _set_mute(self, muted):
@@ -2624,62 +2712,42 @@ class WavePlayer:
         return None
 
     def _toggle_fullscreen(self):
-        """Toggle between fullscreen and 1280×720 windowed mode, rebuilding all layout."""
-        # ── Snapshot current playback so we can restore it after rebuild ──────
-        _snap_tracks   = list(self._media.tracks)
-        _snap_idx      = self._media.current_idx
-        _snap_pos      = self._media._position
-        _snap_playing  = self._media.playing and not self._media.paused
-        _snap_volume   = self._media.volume
-        _snap_shuffle  = self._media.shuffle
-        _snap_repeat   = self._media.repeat
-        _snap_folder   = self._media._current_folder
-        self._media.stop()   # stop cleanly before destroying mixer state
+        """Toggle between fullscreen and windowed, updating layout in-place.
+        Never touches the mixer — music plays continuously with no interruption."""
         # ── Resize display ───────────────────────────────────────────────────
         if self._is_fullscreen:
-            # Switch to a normal resizable window — OS decides initial size
             self.screen = pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
             self.W, self.H = self.screen.get_size()
             self._is_fullscreen = False
         else:
-            # Switch back to true fullscreen
             pygame.display.set_mode((0, 0), pygame.FULLSCREEN | pygame.NOFRAME)
             info = pygame.display.Info()
             self.W, self.H = info.current_w, info.current_h
             self.screen = pygame.display.set_mode((self.W, self.H),
                                                    pygame.FULLSCREEN | pygame.NOFRAME)
             self._is_fullscreen = True
+        # ── Recompute layout and update everything in-place ──────────────────
         self._layout = _compute_layout(self.W, self.H)
         ly = self._layout
         _wave_r=ly["circle_r"]; _wave_cy=ly["circle_cy"]; _wave_cx=ly["circle_cx"]
-        self.wave=WaveformCircle(_wave_cx,_wave_cy,_wave_r)
-        self._media=MediaPlayerMode(_wave_cx,_wave_cy,_wave_r,self.fonts,layout=ly)
-        self.dictation=DictationPopup(self.W,self.H,self.fonts,on_submit=self._on_command_submit,
-                                      circle_cy=_wave_cy,circle_r=_wave_r)
-        self.wallpaper_browser=WallpaperBrowser(self.W,self.H,self.fonts,on_select=self._on_wallpaper_select,bar_h=ly["bar_h"])
-        self.settings_panel=SettingsPanel(
-            self.W,self.H,self.fonts,stt_ref=self._stt,
-            settings=self._settings,on_settings_change=self._on_settings_change,
-            font_list=self._system_fonts,on_font_select=self._on_font_select,
-            command_log=self._cmd_log,bar_h=ly["bar_h"],panel_w=ly["panel_w"])
-        self.help_panel=HelpPanel(self.W,self.H,self.fonts,bar_h=ly["bar_h"])
-        self.playlist_panel=PlaylistPanel(self.W,self.H,ly["bar_h"],self.fonts,
-                                          on_select=self._on_playlist_select)
+        # Waveform circle — recreate (no state)
+        self.wave = WaveformCircle(_wave_cx, _wave_cy, _wave_r)
+        # Media player — update geometry only, never recreate (would restart playback)
+        self._media.update_layout(_wave_cx, _wave_cy, _wave_r, ly)
+        # UI panels — update dimensions in place
+        self.dictation.circle_cx=_wave_cx; self.dictation.circle_cy=_wave_cy
+        self.dictation.circle_r=_wave_r; self.dictation.sw=self.W; self.dictation.sh=self.H
+        self.wallpaper_browser.sw=self.W; self.wallpaper_browser.sh=self.H
+        self.wallpaper_browser._bar_h=ly["bar_h"]
+        tw=self.wallpaper_browser.COLS*(self.wallpaper_browser.THUMB_W+self.wallpaper_browser.THUMB_PAD)-self.wallpaper_browser.THUMB_PAD
+        self.wallpaper_browser._grid_x=(self.W-tw)//2
+        self.wallpaper_browser._grid_y=ly["bar_h"]+60
+        self.settings_panel.w=self.W; self.settings_panel.h=self.H
+        self.settings_panel._bar_h=ly["bar_h"]; self.settings_panel._panel_w=ly["panel_w"]
+        self.help_panel.sw=self.W; self.help_panel.sh=self.H; self.help_panel._bar_h=ly["bar_h"]; self.help_panel._panel_w=ly["panel_w"]
+        self.playlist_panel.sw=self.W; self.playlist_panel.sh=self.H; self.playlist_panel.bar_h=ly["bar_h"]
         if self._wallpaper_path:
             self.wallpaper=self._load_wallpaper(self._wallpaper_path)
-        # ── Restore playback state ───────────────────────────────────────────
-        if _snap_tracks:
-            self._media.tracks        = _snap_tracks
-            self._media.current_idx   = min(_snap_idx, len(_snap_tracks)-1)
-            self._media.volume        = _snap_volume
-            self._media.shuffle       = _snap_shuffle
-            self._media.repeat        = _snap_repeat
-            self._media._current_folder = _snap_folder
-            self._media._resolve_art()
-            self.playlist_panel.set_tracks(_snap_tracks, self._media.current_idx)
-            if _snap_playing:
-                self._media._play_audio(_snap_tracks[self._media.current_idx],
-                                        start_pos=_snap_pos)
 
     def _on_playlist_select(self, idx: int):
         """Called when user clicks a track in the playlist panel."""
@@ -3013,6 +3081,7 @@ class WavePlayer:
             now=time.time(); dt=min(now-prev,0.05); prev=now
             self.status.time_str=time.strftime("%H:%M")
             self.status.date_str=time.strftime("%d %b %Y").upper()
+            self.status.show_date=bool(self._settings.get("show_date",1.0))
             self.status.media_status=self._media.status_msg
             self.status.wake_active=self._wake_active
 
@@ -3067,7 +3136,7 @@ class WavePlayer:
                     self.playlist_panel.sw=self.W; self.playlist_panel.sh=self.H
                     self.playlist_panel.bar_h=ly["bar_h"]
                     self.help_panel.sw=self.W; self.help_panel.sh=self.H
-                    self.help_panel._bar_h=ly["bar_h"]
+                    self.help_panel._bar_h=ly["bar_h"]; self.help_panel._panel_w=ly["panel_w"]
                     self.wallpaper_browser.sw=self.W; self.wallpaper_browser.sh=self.H
                     self.wallpaper_browser._bar_h=ly["bar_h"]
                     if self._wallpaper_path: self.wallpaper=self._load_wallpaper(self._wallpaper_path)
@@ -3089,6 +3158,13 @@ class WavePlayer:
                     elif ctrl and k==pygame.K_h: self.help_panel.toggle()
                     elif ctrl and k==pygame.K_m: self._toggle_mute()
                     elif ctrl and k==pygame.K_w: self.wallpaper_browser.open()
+                    elif k==pygame.K_w and not ctrl:
+                        if self._is_fullscreen: self._toggle_fullscreen()
+                    elif k==pygame.K_f and not ctrl:
+                        if not self._is_fullscreen: self._toggle_fullscreen()
+                    elif k==pygame.K_EQUALS or k==pygame.K_KP_EQUALS:
+                        if self.settings_panel.open: self.settings_panel.open=False
+                        self.playlist_panel.toggle()
                     elif k==pygame.K_ESCAPE: self.running=False
                     else: self._media.handle_key(k, mods)
 
@@ -3108,9 +3184,13 @@ class WavePlayer:
                     if _playlist_btn_rect and _playlist_btn_rect.collidepoint(ev.pos):
                         if self.settings_panel.open: self.settings_panel.open=False
                         self.playlist_panel.toggle(); continue
-                    # ── CPU/RAM stats → open settings ────────────────────────
+                    # ── Mute pill toggle ─────────────────────────────────────
+                    if _mute_pill_rect and _mute_pill_rect.collidepoint(ev.pos):
+                        self._toggle_mute(); continue
+                    # ── CPU/RAM stats → toggle settings ─────────────────────
                     if _stats_rect and _stats_rect.collidepoint(ev.pos):
-                        self.settings_panel.set_open(True); continue
+                        if self.playlist_panel.open: self.playlist_panel.open=False
+                        self.settings_panel.toggle(); continue
                     # ── Volume bar drag start ─────────────────────────────────
                     vbr = self._media._vol_bar_rect
                     if vbr and vbr.collidepoint(ev.pos):
@@ -3227,7 +3307,7 @@ if __name__ == "__main__":
             settings=app._settings, on_settings_change=app._on_settings_change,
             font_list=app._system_fonts, on_font_select=app._on_font_select,
             command_log=app._cmd_log, bar_h=_ly["bar_h"], panel_w=_ly["panel_w"])
-        app.help_panel = HelpPanel(1280, 720, app.fonts, bar_h=_ly["bar_h"])
+        app.help_panel = HelpPanel(1280, 720, app.fonts, bar_h=_ly["bar_h"], panel_w=_ly["panel_w"])
 
     print(f"\n{APP_NAME} v{VERSION}")
     print("-"*60)

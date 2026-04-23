@@ -5,6 +5,17 @@ Universal Desktop Voice-Controlled Media Player,
 * use "Mic Threashold" on settings panel to change to trigger level for STT
 * set a custom wakeword in the Settings Panel
 
+Install Linux:
+```
+chmod +x install_music_player.sh
+./install_music_player.sh
+```
+
+Install Windows:
+```
+run install_music_player.bat
+```
+
 
 Features:
 ```
