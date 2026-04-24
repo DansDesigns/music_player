@@ -73,6 +73,12 @@ try:
 except ImportError:
     CV2_OK = False
 
+try:
+    from mutagen import File as MutagenFile
+    MUTAGEN_OK = True
+except ImportError:
+    MUTAGEN_OK = False
+
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 print(f"[DEBUG] Script dir: {_SCRIPT_DIR}")
 print(f"[DEBUG] CWD: {os.getcwd()}")
@@ -299,6 +305,45 @@ def _compute_layout(W: int, H: int) -> dict:
     )
 
 
+# ── Audio duration helper ─────────────────────────────────────────────────────
+
+def _get_audio_duration(path: str) -> float:
+    """Return track duration in seconds. Tries mutagen, then ffprobe, then Sound."""
+    # 1. mutagen — fast, pure-python, no subprocess
+    if MUTAGEN_OK:
+        try:
+            f = MutagenFile(path)
+            if f is not None and hasattr(f, 'info') and hasattr(f.info, 'length'):
+                d = float(f.info.length)
+                if d > 0:
+                    return d
+        except Exception:
+            pass
+    # 2. ffprobe — works for any format
+    try:
+        import subprocess as _sp
+        out = _sp.check_output(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1', path],
+            stderr=_sp.DEVNULL, timeout=3
+        ).decode().strip()
+        d = float(out)
+        if d > 0:
+            return d
+    except Exception:
+        pass
+    # 3. pygame.mixer.Sound — loads full file into RAM, last resort
+    try:
+        snd = pygame.mixer.Sound(path)
+        d = snd.get_length()
+        del snd
+        if d > 0:
+            return d
+    except Exception:
+        pass
+    return 0.0
+
+
 # ── Drawing helpers ────────────────────────────────────────────────────────────
 
 def draw_circle_alpha(surface, colour_rgba, centre, radius):
@@ -490,13 +535,10 @@ class TTSEngine:
 
     def _run_pyttsx3(self):
         if not PYTTSX3_OK: self.error = "pyttsx3 not installed"; return
-        try:
-            import pyttsx3 as _p
-            engine = _p.init()
-            engine.setProperty("rate", self._rate)
-            engine.setProperty("volume", self._volume)
-            self.ready = True
-        except Exception as e: self.error = str(e); return
+        # pyttsx3's runAndWait() pumps a COM/Windows message loop.
+        # Running it on a shared thread can leak WM_QUIT into pygame.
+        # Each utterance is isolated in its own daemon thread with CoInitialize.
+        self.ready = True
         while not self._stop_flag:
             while not self._stop_flag:
                 with self._lock: text = self._queue.pop(0) if self._queue else None
@@ -504,11 +546,29 @@ class TTSEngine:
                 self._utt_len = max(0.5, len(text.split()) / (self._rate / 60.0))
                 self._utt_start = time.time()
                 self._tts_begin()
-                try:
-                    engine.setProperty("rate", self._rate)
-                    engine.setProperty("volume", self._volume)
-                    engine.say(text); engine.runAndWait()
-                except: pass
+                done = threading.Event()
+                def _speak_isolated(t=text, r=self._rate, v=self._volume, d=done):
+                    try:
+                        if platform.system() == "Windows":
+                            try:
+                                import pythoncom
+                                pythoncom.CoInitialize()
+                            except Exception:
+                                pass
+                        import pyttsx3 as _p
+                        eng = _p.init()
+                        eng.setProperty("rate", r)
+                        eng.setProperty("volume", v)
+                        eng.say(t)
+                        eng.runAndWait()
+                        eng.stop()
+                    except Exception:
+                        pass
+                    finally:
+                        d.set()
+                t = threading.Thread(target=_speak_isolated, daemon=True)
+                t.start()
+                done.wait(timeout=30)
                 self._tts_end()
             self._event.wait(timeout=0.1); self._event.clear()
 
@@ -1047,11 +1107,24 @@ class WaveformCircle:
 
     def __init__(self, cx, cy, radius):
         self.cx=cx; self.cy=cy; self.base_radius=radius
-        self.BAR_MAX = max(20, int(radius * 0.35))   # ~35% of radius
+        self.BAR_MAX = max(10, int(radius * 0.175))  # half the original 0.35
         self.bar_heights=[0.0]*self.NUM_BARS
         self.tts_radius=0.0
         self._noise=[random.random() for _ in range(self.NUM_BARS)]
         self._phase=0.0; self._tts_smooth=0.0
+        self._bar_trig=[]   # pre-computed trig cache
+
+    def _rebuild_trig_cache(self):
+        dpb = 360.0 / self.NUM_BARS
+        hw  = self.BAR_WIDTH / 2
+        self._bar_trig = []
+        for i in range(self.NUM_BARS):
+            ar  = math.radians(i * dpb - 90.0)
+            pr2 = math.radians(i * dpb)
+            self._bar_trig.append((
+                math.cos(ar), math.sin(ar),
+                hw * math.cos(pr2), hw * math.sin(pr2)
+            ))
 
     def update(self, stt: float, tts: float, dt: float):
         self._phase+=dt*2.0
@@ -1066,6 +1139,11 @@ class WaveformCircle:
 
     def draw(self, surface):
         cx,cy,r=self.cx,self.cy,self.base_radius
+
+        # Rebuild trig cache if needed
+        if len(self._bar_trig) != self.NUM_BARS:
+            self._rebuild_trig_cache()
+
         lv=self._tts_smooth
         if lv>0.01:
             fa=int(self._HALO_FRINGE_ALPHA*lv)
@@ -1083,21 +1161,31 @@ class WaveformCircle:
                 l_alpha=int(110*lv*(1.0-frac*0.6))
                 l_col=lerp_col(TTS_HALO_OUTER,TTS_HALO_INNER,frac)
                 if r<=l_inner or l_alpha<1: continue
-                tmp=pygame.Surface((r*2,r*2),pygame.SRCALPHA)
+                tmp=_get_surf(r*2, r*2)
                 pygame.draw.circle(tmp,(*l_col,l_alpha),(r,r),r)
                 if l_inner>0: pygame.draw.circle(tmp,(0,0,0,0),(r,r),l_inner)
                 surface.blit(tmp,(cx-r,cy-r))
         draw_circle_alpha(surface,(*DARK_BG,CIRCLE_ALPHA),(cx,cy),r)
-        dpb=360.0/self.NUM_BARS
+
+        # ── Bars + outer connecting ring ─────────────────────────────────────
+        # Collect the tip (x2,y2) of every bar so we can draw the connecting
+        # circle through them all. The outer ring radius is r + BAR_MAX so it
+        # sits at the tip of a fully-extended bar; shorter bars leave a gap
+        # showing the ring "floating" just past the bar end.
+        tip_pts = []
         for i in range(self.NUM_BARS):
-            ar=math.radians(i*dpb-90.0)
-            bh=self.BAR_MIN+self.bar_heights[i]*(self.BAR_MAX-self.BAR_MIN)
-            x1=cx+r*math.cos(ar); y1=cy+r*math.sin(ar)
-            x2=cx+(r+bh)*math.cos(ar); y2=cy+(r+bh)*math.sin(ar)
-            pr2=math.radians(i*dpb); hw=self.BAR_WIDTH/2
-            dx=hw*math.cos(pr2); dy=hw*math.sin(pr2)
-            pygame.draw.polygon(surface,WAVEFORM_WHITE,
-                [(x1-dx,y1-dy),(x1+dx,y1+dy),(x2+dx,y2+dy),(x2-dx,y2-dy)])
+            ca, sa, dx, dy = self._bar_trig[i]
+            bh = self.BAR_MIN + self.bar_heights[i] * (self.BAR_MAX - self.BAR_MIN)
+            x1 = cx + r  * ca;       y1 = cy + r  * sa
+            x2 = cx + (r+bh) * ca;   y2 = cy + (r+bh) * sa
+            tip_pts.append((x2, y2))
+            pygame.draw.polygon(surface, WAVEFORM_WHITE,
+                [(x1-dx, y1-dy),(x1+dx, y1+dy),
+                 (x2+dx, y2+dy),(x2-dx, y2-dy)])
+
+        # Outer ring — polyline connecting all bar tips so it pulses with the waveform
+        if len(tip_pts) >= 3:
+            pygame.draw.polygon(surface, WAVEFORM_WHITE, [(int(x), int(y)) for x,y in tip_pts], 1)
 
 
 # ── Settings Panel ─────────────────────────────────────────────────────────────
@@ -1626,10 +1714,10 @@ def draw_bottom_bar(surface, fonts, status, w, h, bar_alpha=1.0, bar_h=None):
                         bat_str = f"  BAT {pct}%{chg}"
                 except Exception: pass
                 # Show: sys avg / peak core / this app / RAM used
+                ram_free_gb = (ram.total - ram.used) / (1024**3)
                 status._stats_str = (
-                    f"CPU {cpu_avg:.0f}% (pk {cpu_peak:.0f}%)  "
-                    f"App {self_cpu:.0f}%  "
-                    f"RAM {ram_used_gb:.1f}/{ram_total_gb:.0f}GB {ram_pct:.0f}%"
+                    f"CPU {cpu_peak:.0f}%  "
+                    f"RAM {ram_used_gb:.1f}GB / {ram_free_gb:.1f}GB free"
                     f"{bat_str}"
                 )
                 status._stats_t = now_t
@@ -1908,6 +1996,9 @@ class MediaPlayerMode:
         self._video_path=None; self._video_fps=24.0; self._video_pos=0.0; self._video_duration=0.0
         self._start_t=0.0; self._position=0.0; self._duration=0.0
         self._btn_rects: list=[]; self._vol_bar_rect: Optional[pygame.Rect]=None; self.music_level: float=0.0
+        self._seek_bar_rect: Optional[pygame.Rect]=None
+        self._seek_bar_x: int = 0
+        self._seek_bar_w: int = 1
         self.status_msg="Scanning for media…"
         self._pending_artist: Optional[str]=None; self._pending_artist_matches: list=[]
         self._current_folder: str = ""   # set when user picks a folder
@@ -2127,12 +2218,18 @@ class MediaPlayerMode:
     # ── click / key ───────────────────────────────────────────────────────────
 
     def handle_click(self, pos) -> bool:
-        for label,rect in self._btn_rects:
-            if rect.collidepoint(pos): self._btn_action(label); return True
-        # Volume bar click
+        # Seek bar checked FIRST — has priority over everything below it
+        if self._seek_bar_rect and self._seek_bar_rect.collidepoint(pos):
+            rel = max(0.0, min(1.0, (pos[0] - self._seek_bar_x) / max(1, self._seek_bar_w)))
+            self.seek_to_frac(rel); return True
+        # Volume bar
         if self._vol_bar_rect and self._vol_bar_rect.collidepoint(pos):
             rel = max(0.0, min(1.0, (pos[0] - self._vol_bar_rect.x) / max(1, self._vol_bar_rect.width)))
             self.set_volume(rel); return True
+        # Transport buttons
+        for label,rect in self._btn_rects:
+            if rect.collidepoint(pos): self._btn_action(label); return True
+        # Circle tap = play/pause
         dx,dy=pos[0]-self.cx,pos[1]-self.cy
         if dx*dx+dy*dy<=self.r*self.r:
             if self.playing and not self.paused: self.pause()
@@ -2193,7 +2290,6 @@ class MediaPlayerMode:
         pygame.draw.circle(surface,MEDIA_ACCENT,(cx,cy),r,2)
         self._draw_info_arc(surface,cx,cy,r)
         self._draw_controls(surface,cx,cy,r)
-        self._draw_progress_arc(surface,cx,cy,r)
         if stt_active and stt_level>0.005:
             ovl=pygame.Surface((r*2,r*2),pygame.SRCALPHA); ovl.fill((0,0,0,0))
             pygame.draw.circle(ovl,(*DARK_BG,160),(r,r),r); surface.blit(ovl,(cx-r,cy-r))
@@ -2258,12 +2354,16 @@ class MediaPlayerMode:
         try:
             pygame.mixer.music.load(path)
             pygame.mixer.music.set_volume(self.volume*self._duck_factor)
-            # pygame.mixer.music.play() accepts a start offset in seconds
             pygame.mixer.music.play(start=start_pos)
             self.playing=True; self.paused=False
             self._position=start_pos
             self._start_t=time.time()-start_pos
             self.status_msg=f"♪ {os.path.basename(path)}"
+            # Get duration in background thread so UI doesn't stall
+            def _fetch_dur(p):
+                d = _get_audio_duration(p)
+                self._duration = d
+            threading.Thread(target=_fetch_dur, args=(path,), daemon=True).start()
         except Exception as e: self.status_msg=f"Cannot play: {e}"
 
     def _play_video(self, path: str):
@@ -2437,15 +2537,19 @@ class MediaPlayerMode:
 
         # ── Layout: anchor group from bottom bar upward so nothing overlaps ───
         vol_lbl_h = self.fonts["sm"].get_height()
+        seek_bar_h = 8
+        seek_zone_h = seek_bar_h + 4 + vol_lbl_h + 10  # seek bar + time labels + gap
         group_h   = self.CTRL_BTN_H + 8 + self.VOL_BAR_H + 4 + vol_lbl_h
-        # Bottom of the group sits just above the bottom bar with a small margin
+        full_h    = seek_zone_h + group_h
         if self._screen_h:
             group_bottom = self._screen_h - self._bar_h - 10
         else:
-            # Fallback: just below the time label
             pos_h = self.fonts["sm"].get_height()
-            group_bottom = cy + r + self._time_gap + pos_h + self._ctrl_gap + group_h
+            group_bottom = cy + r + self._time_gap + pos_h + self._ctrl_gap + full_h
         ctrl_y = group_bottom - group_h
+
+        # ── Seek / timeline bar — sits above buttons ───────────────────────────
+        self._draw_seek_bar(surface, cx - total_w//2, ctrl_y - seek_zone_h - 4, total_w, seek_bar_h)
 
         for i,(key,icon) in enumerate(buttons):
             bx=sx+i*(self.CTRL_BTN_W+8); rect=pygame.Rect(bx,ctrl_y,self.CTRL_BTN_W,self.CTRL_BTN_H)
@@ -2480,20 +2584,92 @@ class MediaPlayerMode:
         # store hit rect for click handling
         self._vol_bar_rect = pygame.Rect(bar_x - 4, vol_y, bar_w + 8, self.VOL_BAR_H)
 
-    def _draw_progress_arc(self, surface, cx, cy, r):
-        if not self.tracks: return
+    def _draw_seek_bar(self, surface, bar_x, top_y, total_w, bar_h):
+        """Draw timeline seek bar. bar_x is the left edge."""
+        if not self.tracks:
+            return
+
+        # ── Get position and duration ──────────────────────────────────────────
         if self._video_cap is not None:
-            dur=self._video_duration; pos=self._video_pos
+            dur = self._video_duration
+            pos = self._video_pos
         else:
-            try: dur=pygame.mixer.music.get_pos()/1000.0 if pygame.mixer.music.get_busy() else 0.0
-            except Exception: dur=0.0
-            pos=self._position
-        if dur<=0: return
-        frac=min(1.0,pos/max(1,dur)); start_a=-90; end_a=start_a+frac*360
-        for ang in range(int(start_a),int(end_a),2):
-            ar=math.radians(ang); x=int(cx+(r+6)*math.cos(ar)); y=int(cy+(r+6)*math.sin(ar))
-            col=lerp_col(MEDIA_MID,MEDIA_ACCENT,frac)
-            pygame.draw.circle(surface,col,(x,y),2)
+            pos = self._position
+            dur = getattr(self, '_duration', 0.0)
+            if not dur or dur <= 0:
+                try:
+                    ms = pygame.mixer.music.get_pos()
+                    dur = ms / 1000.0 if ms and ms > 0 else 0.0
+                except Exception:
+                    dur = 0.0
+
+        # frac: 0.0 at start, 1.0 at end
+        if dur > 0:
+            frac = max(0.0, min(1.0, pos / dur))
+        else:
+            frac = 0.0
+
+        bar_y = top_y
+        bar_r = bar_h // 2
+
+        # ── Background track ───────────────────────────────────────────────────
+        draw_rounded_rect_alpha(surface,
+            pygame.Rect(bar_x, bar_y, total_w, bar_h),
+            (*MEDIA_DARK, 200), radius=bar_r)
+
+        # ── Filled progress ────────────────────────────────────────────────────
+        fill_w = int(total_w * frac)          # no minimum — 0 at start is correct
+        if fill_w > 0:
+            fill_col = lerp_col(MEDIA_MID, MEDIA_ACCENT, frac)
+            draw_rounded_rect_alpha(surface,
+                pygame.Rect(bar_x, bar_y, fill_w, bar_h),
+                (*fill_col, 230), radius=bar_r)
+
+        # ── Thumb ──────────────────────────────────────────────────────────────
+        thumb_x = bar_x + fill_w
+        thumb_y = bar_y + bar_h // 2
+        draw_circle_alpha(surface, (*MEDIA_ACCENT, 255), (thumb_x, thumb_y), 8)
+        draw_circle_alpha(surface, (220, 255, 230, 220), (thumb_x, thumb_y), 4)
+
+        # ── Time labels ────────────────────────────────────────────────────────
+        def _fmt(s):
+            s = max(0, int(s))
+            return f"{s // 60}:{s % 60:02d}"
+        tl = self.fonts["sm"].render(_fmt(pos), True, TEXT_BRIGHT)
+        tr = self.fonts["sm"].render(_fmt(dur), True, TEXT_BRIGHT)
+        surface.blit(tl, (bar_x, bar_y + bar_h + 3))
+        surface.blit(tr, (bar_x + total_w - tr.get_width(), bar_y + bar_h + 3))
+
+        # ── Hit rect and coords for click/drag ─────────────────────────────────
+        self._seek_bar_rect = pygame.Rect(bar_x, bar_y - 8, total_w, bar_h + 20)
+        self._seek_bar_x    = bar_x
+        self._seek_bar_w    = total_w
+
+    def seek_to_frac(self, frac: float):
+        """Seek to a fractional position 0.0–1.0 of the current track."""
+        frac = max(0.0, min(1.0, frac))
+        if self._video_cap is not None:
+            try:
+                target = frac * self._video_duration
+                self._video_cap.set(1, int(target * self._video_fps))
+                self._video_pos = target
+            except Exception: pass
+            return
+        dur = self._duration
+        if dur <= 0:
+            return
+        target_s = frac * dur
+        try:
+            was_paused = self.paused
+            pygame.mixer.music.play(start=target_s)
+            self._start_t  = time.time() - target_s
+            self._position = target_s
+            self.playing   = True
+            self.paused    = False
+            if was_paused:
+                pygame.mixer.music.pause()
+                self.paused = True
+        except Exception: pass
 
     def _btn_action(self, label: str):
         if label=="prev":       self.prev_track()
@@ -2680,6 +2856,8 @@ class WavePlayer:
         self.W, self.H = self.screen.get_size()
         self._is_fullscreen = False
         self.clock=pygame.time.Clock(); self.running=True
+        self._cmd_queue: list = []   # commands dispatched from STT thread, processed on main thread
+        self._cmd_lock = threading.Lock()
 
         self._settings=load_settings()
         self.fonts=load_fonts(self._settings.get("ui_font",""))
@@ -2740,6 +2918,7 @@ class WavePlayer:
                                           on_select=self._on_playlist_select)
 
         self._vol_dragging = False
+        self._seek_dragging = False
         self._last_save_t = 0.0   # for periodic playback state saves
         self._stt.start()
         self._tts.start()
@@ -2976,7 +3155,7 @@ class WavePlayer:
         if not ww:
             if self.dictation.visible:
                 self.dictation.dismiss()
-            self._on_command_submit(low)
+            with self._cmd_lock: self._cmd_queue.append(low)
             return
 
         # ── Check for wake word in final result ──────────────────────────────
@@ -2987,9 +3166,9 @@ class WavePlayer:
             if self.dictation.visible:
                 self.dictation.dismiss()
             if after:
-                # Full "computer <command>" in one utterance — dispatch now
+                # Full "computer <command>" in one utterance — queue for main thread
                 self._reset_wake_word()
-                self._on_command_submit(after)
+                with self._cmd_lock: self._cmd_queue.append(after)
             else:
                 # Just the wake word — stay armed, show listening prompt
                 self.dictation.show("")
@@ -3005,7 +3184,7 @@ class WavePlayer:
         if self.dictation.visible:
             self.dictation.dismiss()
         self._reset_wake_word()
-        self._on_command_submit(low)
+        with self._cmd_lock: self._cmd_queue.append(low)
 
     def _stt_level(self, level):
         self.status.stt_level = level
@@ -3246,6 +3425,13 @@ class WavePlayer:
                     self._media.music_level if not self._media_stt_active else 0.0),
                 self.status.tts_level, dt)
 
+            # ── Drain STT command queue (safe: main thread only) ──────────────
+            with self._cmd_lock:
+                pending = list(self._cmd_queue)
+                self._cmd_queue.clear()
+            for _cmd in pending:
+                self._on_command_submit(_cmd)
+
             # Events
             for ev in pygame.event.get():
                 if ev.type==pygame.QUIT: self.running=False
@@ -3331,10 +3517,16 @@ class WavePlayer:
                         self._vol_dragging = True
                         rel = max(0.0, min(1.0, (ev.pos[0]-vbr.x)/max(1,vbr.width)))
                         self._media.set_volume(rel); continue
-                    if self._media.handle_click(ev.pos): continue
+                    if self._media.handle_click(ev.pos):
+                        # If the seek bar was clicked, start drag mode
+                        sbr = self._media._seek_bar_rect
+                        if sbr and sbr.collidepoint(ev.pos):
+                            self._seek_dragging = True
+                        continue
 
                 elif ev.type==pygame.MOUSEBUTTONUP and ev.button==1:
-                    self._vol_dragging = False
+                    self._vol_dragging  = False
+                    self._seek_dragging = False
                     self.settings_panel.handle_mouseup(ev.pos)
 
                 elif ev.type==pygame.MOUSEMOTION:
@@ -3343,6 +3535,14 @@ class WavePlayer:
                         if vbr:
                             rel = max(0.0, min(1.0, (ev.pos[0]-vbr.x)/max(1,vbr.width)))
                             self._media.set_volume(rel)
+                    if self._seek_dragging:
+                        if self._media._seek_bar_rect and self._media._seek_bar_rect.collidepoint(ev.pos[0], self._media._seek_bar_rect.centery):
+                            rel = max(0.0, min(1.0, (ev.pos[0] - self._media._seek_bar_x) / max(1, self._media._seek_bar_w)))
+                            self._media.seek_to_frac(rel)
+                        elif self._seek_dragging:
+                            # Still dragging even if mouse drifts above/below bar
+                            rel = max(0.0, min(1.0, (ev.pos[0] - self._media._seek_bar_x) / max(1, self._media._seek_bar_w)))
+                            self._media.seek_to_frac(rel)
                     self.settings_panel.handle_mousemove(ev.pos)
                     self.playlist_panel.handle_mousemove(ev.pos)
 
