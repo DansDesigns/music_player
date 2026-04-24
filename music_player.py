@@ -1596,9 +1596,27 @@ def draw_bottom_bar(surface, fonts, status, w, h, bar_alpha=1.0, bar_h=None):
     if PSUTIL_OK:
         try:
             now_t = time.time()
-            if now_t - getattr(status, "_stats_t", 0) >= 4.0:
-                cpu = psutil.cpu_percent(interval=None)
-                ram = psutil.virtual_memory().percent
+            if now_t - getattr(status, "_stats_t", 0) >= 2.0:
+                # per-cpu=True gives load per core; we show the peak core
+                # so a single busy core shows high rather than diluted across all cores
+                per_core = psutil.cpu_percent(interval=None, percpu=True)
+                cpu_avg  = sum(per_core) / len(per_core)   # overall average
+                cpu_peak = max(per_core)                    # busiest core
+                ram  = psutil.virtual_memory()
+                ram_used_gb = ram.used  / (1024**3)
+                ram_total_gb = ram.total / (1024**3)
+                ram_pct = ram.percent
+                # this process's own CPU (sum across threads, so can exceed 100% on multi-core)
+                try:
+                    proc_cpu = getattr(status, "_proc", None)
+                    if proc_cpu is None:
+                        import os as _os
+                        status._proc = psutil.Process(_os.getpid())
+                        status._proc.cpu_percent(interval=None)  # prime it
+                        proc_cpu = status._proc
+                    self_cpu = proc_cpu.cpu_percent(interval=None)
+                except Exception:
+                    self_cpu = 0.0
                 bat_str = ""
                 try:
                     bat = psutil.sensors_battery()
@@ -1607,12 +1625,19 @@ def draw_bottom_bar(surface, fonts, status, w, h, bar_alpha=1.0, bar_h=None):
                         chg = "+" if bat.power_plugged else "-"
                         bat_str = f"  BAT {pct}%{chg}"
                 except Exception: pass
-                status._stats_str = f"CPU {cpu:.0f}%  RAM {ram:.0f}%{bat_str}"
-                status._stats_t   = now_t
+                # Show: sys avg / peak core / this app / RAM used
+                status._stats_str = (
+                    f"CPU {cpu_avg:.0f}% (pk {cpu_peak:.0f}%)  "
+                    f"App {self_cpu:.0f}%  "
+                    f"RAM {ram_used_gb:.1f}/{ram_total_gb:.0f}GB {ram_pct:.0f}%"
+                    f"{bat_str}"
+                )
+                status._stats_t = now_t
             st = getattr(status, "_stats_str", "CPU --%  RAM --%")
-        except Exception: st="--"
+        except Exception as e:
+            st = f"stats err: {e}"
     else:
-        st="CPU --  RAM --"
+        st = "psutil not installed"
     ss=fonts["sm"].render(st,True,TEXT_BRIGHT)
     stats_pad=8; stats_vpad=3
     stats_x=w-ss.get_width()-stats_pad*2-16
