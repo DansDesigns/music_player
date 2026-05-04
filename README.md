@@ -1,4 +1,4 @@
-# WavePlayer — v1.0.0
+# WavePlayer - v1.0.0
 Universal Desktop Voice-Controlled Media Player,
 
 * recomended to have wallpapers in a ```wallpapers``` folder in ```/Home/Pictures/``` on Linux, or in ```User\Pictures\``` on Windows 
