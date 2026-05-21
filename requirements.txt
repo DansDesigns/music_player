@@ -6,3 +6,5 @@ opencv-python
 vosk
 pygame
 pynput
+soundfile
+mutagen

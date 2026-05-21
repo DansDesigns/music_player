@@ -159,6 +159,42 @@ if %errorlevel% neq 0 (
 )
 echo.
 
+:: ── ffmpeg (needed for MP3 overamplification and duration detection) ──────────
+echo ------------------------------
+echo Checking for ffmpeg...
+echo ------------------------------
+ffmpeg -version >nul 2>&1
+if %errorlevel% equ 0 (
+    for /f "tokens=3" %%v in ('ffmpeg -version 2^>^&1 ^| findstr /i "ffmpeg version"') do (
+        echo        Found: ffmpeg %%v
+        goto :ffmpeg_done
+    )
+    echo        Found: ffmpeg
+) else (
+    echo        ffmpeg not found. Installing via winget...
+    winget install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%REFRESH_PS1%" 2>nul
+    if exist "%REFRESH_BAT%" call "%REFRESH_BAT%"
+    ffmpeg -version >nul 2>&1
+    if %errorlevel% equ 0 (
+        echo        ffmpeg installed.
+    ) else (
+        echo        WARNING: ffmpeg not on PATH yet. MP3 overamplification may not work.
+        echo          Restart your terminal after install, or get ffmpeg from:
+        echo          https://ffmpeg.org/download.html
+    )
+)
+:ffmpeg_done
+echo.
+
+:: ── Temp files for PATH refresh after winget installs ───────────────────────
+set "REFRESH_PS1=%TEMP%\wp_refresh.ps1"
+set "REFRESH_BAT=%TEMP%\wp_refresh_path.bat"
+echo $s = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name Path -EA SilentlyContinue).Path  > "%REFRESH_PS1%"
+echo $u = (Get-ItemProperty 'HKCU:\Environment' -Name Path -EA SilentlyContinue).Path                                                   >> "%REFRESH_PS1%"
+echo if ($u) { $p = "$s;$u" } else { $p = $s }                                                                                          >> "%REFRESH_PS1%"
+echo Set-Content -Path ([System.IO.Path]::GetTempPath() + 'wp_refresh_path.bat') -Value "@set PATH=$p"                                   >> "%REFRESH_PS1%"
+
 :: ── Resolve icon ──────────────────────────────────────────────────────────────
 set "ICON_PATH=%INSTALL_DIR%\icon.ico"
 if not exist "%ICON_PATH%" set "ICON_PATH=%INSTALL_DIR%\.venv\Scripts\python.exe"

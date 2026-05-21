@@ -49,16 +49,19 @@ if [ -n "$PKG_INSTALL" ]; then
         $PKG_INSTALL \
             python3 python3-pip python3-venv python3-tk \
             espeak espeak-ng libespeak-ng1 \
+            libsndfile1 libsndfile1-dev \
+            ffmpeg \
             git
     elif command -v dnf &>/dev/null; then
         $PKG_INSTALL \
             python3 python3-pip python3-tkinter \
             espeak espeak-ng \
+            libsndfile ffmpeg \
             git
     elif command -v pacman &>/dev/null; then
         $PKG_INSTALL \
             python python-pip tk \
-            espeak-ng \
+            espeak-ng libsndfile ffmpeg \
             git
     fi
 fi
@@ -124,6 +127,31 @@ echo "Installing Python dependencies..."
 echo "------------------------------"
 pip install --upgrade pip
 pip install -r "$SCRIPT_DIR/requirements.txt"
+echo ""
+
+# ── ffmpeg (needed for MP3 overamplification and duration detection) ──────────
+echo "------------------------------"
+echo "Checking for ffmpeg..."
+echo "------------------------------"
+if command -v ffmpeg &>/dev/null; then
+    echo "  Found: $(ffmpeg -version 2>&1 | head -1 | awk '{print $1, $2, $3}')"
+else
+    echo "  ffmpeg not found. Installing..."
+    case "$PKG_MGR" in
+        apt|nala)  $PKG_INSTALL ffmpeg ;;
+        dnf)       $PKG_INSTALL ffmpeg ;;
+        pacman)    $PKG_INSTALL ffmpeg ;;
+        zypper)    $PKG_INSTALL ffmpeg ;;
+        *)
+            echo "  WARNING: Cannot auto-install ffmpeg."
+            echo "    Ubuntu/Debian: sudo apt install ffmpeg"
+            echo "    Fedora:        sudo dnf install ffmpeg"
+            echo "    Arch:          sudo pacman -S ffmpeg"
+            echo "    Or:            https://ffmpeg.org/download.html"
+            ;;
+    esac
+    command -v ffmpeg &>/dev/null && echo "  ffmpeg installed." ||         echo "  WARNING: ffmpeg still not found. MP3 overamplification may not work."
+fi
 echo ""
 
 # ── Make run script executable ───────────────────────────────────────────────

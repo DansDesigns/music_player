@@ -367,8 +367,20 @@ def draw_rounded_rect_alpha(surface, rect, fill_rgba, border_rgba=None,
         pygame.draw.rect(tmp, border_rgba, r, border_w, **kw)
     surface.blit(tmp, rect.topleft)
 
+_surf_cache: dict = {}
+
+def _get_surf(w: int, h: int) -> pygame.Surface:
+    """Return a reusable SRCALPHA surface of exactly (w, h), cleared each call."""
+    key = (w, h)
+    if key not in _surf_cache:
+        _surf_cache[key] = pygame.Surface((w, h), pygame.SRCALPHA)
+    s = _surf_cache[key]
+    s.fill((0, 0, 0, 0))
+    return s
+
 def lerp_col(a, b, t):
-    return tuple(int(a[i]+(b[i]-a[i])*t) for i in range(3))
+    t = max(0.0, min(1.0, t))
+    return tuple(max(0, min(255, int(a[i]+(b[i]-a[i])*t))) for i in range(3))
 
 def blend_col(base, tgt, speed, dt):
     return lerp_col(base, tgt, min(1.0, speed*dt))
@@ -486,7 +498,12 @@ class TTSEngine:
     def _run_windows(self):
         try:
             import pythoncom, win32com.client
-            pythoncom.CoInitialize()
+            # Use MTA (Multi-Threaded Apartment) instead of STA.
+            # STA creates a hidden message-pump window; async SAPI5 calls post
+            # completion messages to it, and without pumping those messages can
+            # include WM_QUIT which leaks into pygame's event queue and closes
+            # the window.  MTA has no hidden HWND so that path is impossible.
+            pythoncom.CoInitializeEx(0, pythoncom.COINIT_MULTITHREADED)
             speaker = win32com.client.Dispatch("SAPI.SpVoice")
             self.ready = True
         except Exception as e:
@@ -502,10 +519,10 @@ class TTSEngine:
                 try:
                     speaker.Rate   = int((self._rate - 175) / 25)
                     speaker.Volume = int(self._volume * 100)
-                    speaker.Speak(text, 1)
-                    while speaker.IsSpeaking():
-                        if self._stop_flag: speaker.Speak("", 2); break
-                        time.sleep(0.05)
+                    # SVSFDefault (0) = synchronous — blocks until speech is done.
+                    # No IsSpeaking() poll loop needed, and no async completion
+                    # messages are posted to any COM apartment queue.
+                    speaker.Speak(text, 0)
                 except: pass
                 self._tts_end()
             self._event.wait(timeout=0.1); self._event.clear()
@@ -552,7 +569,8 @@ class TTSEngine:
                         if platform.system() == "Windows":
                             try:
                                 import pythoncom
-                                pythoncom.CoInitialize()
+                                # MTA: no hidden HWND, no message pump, no WM_QUIT leak
+                                pythoncom.CoInitializeEx(0, pythoncom.COINIT_MULTITHREADED)
                             except Exception:
                                 pass
                         import pyttsx3 as _p
@@ -1662,7 +1680,7 @@ def draw_bottom_bar(surface, fonts, status, w, h, bar_alpha=1.0, bar_h=None):
     if getattr(status, "wake_active", False):
         wlbl = fonts["sm_b"].render("◉ LISTENING", True, MEDIA_ACCENT)
         wpw  = wlbl.get_width() + px2*2; wph = wlbl.get_height() + py2*2
-        wpx  = pill_x - wpw - 10; wpy = by + (bh - wph) // 2
+        wpx  = w - wpw - 16; wpy = by + (bh - wph) // 2
         draw_rounded_rect_alpha(surface, pygame.Rect(wpx, wpy, wpw, wph),
             (*MEDIA_DARK, 210), border_rgba=(*MEDIA_MID, 200), border_w=1, radius=wph//2)
         surface.blit(wlbl, (wpx + px2, wpy + py2))
@@ -1831,13 +1849,31 @@ class VoskSTT:
             if rec.AcceptWaveform(pcm):
                 raw=json.loads(rec.Result()).get("text","").strip()
                 if raw: self.on_final([],raw)
-            elif not self.muted:
+            else:
                 raw=json.loads(rec.PartialResult()).get("partial","").strip()
                 if raw: self.on_partial(raw,None)
-        try:
-            with sd.InputStream(samplerate=SAMPLE_RATE,channels=1,dtype="float32",blocksize=4000,callback=cb):
-                while self._running: time.sleep(0.05)
-        except Exception as e: self.error=str(e); print(f"[VoskSTT] {e}")
+
+        # Open/close the mic stream based on mute state.
+        # When muted the stream is fully stopped so the mic hardware and
+        # PortAudio callback thread are idle — saves ~3-5% CPU + battery.
+        while self._running:
+            if self.muted:
+                self.on_level(0.0)          # zero out VU meter
+                rec.Reset()                 # clear any partial recogniser state
+                # Sleep cheaply until unmuted or stopped
+                while self._running and self.muted:
+                    time.sleep(0.1)
+                if not self._running:
+                    break
+                rec.Reset()                 # fresh start after unmute
+            try:
+                with sd.InputStream(samplerate=SAMPLE_RATE,channels=1,
+                                    dtype="float32",blocksize=4000,callback=cb):
+                    while self._running and not self.muted:
+                        time.sleep(0.05)
+            except Exception as e:
+                self.error=str(e); print(f"[VoskSTT] {e}")
+                time.sleep(1.0)             # back-off before retry
 
     # ── static command parsers ─────────────────────────────────────────────────
 
@@ -1972,8 +2008,9 @@ class MediaPlayerMode:
     CTRL_RADIUS    = 8
     VOL_BAR_H      = 24   # height of the clickable volume bar hit zone
 
-    def __init__(self, cx: int, cy: int, circle_r: int, fonts: dict, layout: dict=None):
+    def __init__(self, cx: int, cy: int, circle_r: int, fonts: dict, layout: dict=None, on_volume_change=None):
         self.cx=cx; self.cy=cy; self.r=circle_r; self.fonts=fonts
+        self._on_volume_change = on_volume_change
         ly = layout or {}
         # Scale button/bar sizes from layout if provided, else fall back to constants
         self.CTRL_BTN_W  = ly.get("btn_w",  self.CTRL_BTN_W)
@@ -2288,7 +2325,6 @@ class MediaPlayerMode:
         if not frame_drawn and self._art_surf: self._blit_circle_image(surface,self._art_surf,cx,cy,r)
         self._draw_inner_eq(surface,cx,cy,r)
         pygame.draw.circle(surface,MEDIA_ACCENT,(cx,cy),r,2)
-        self._draw_info_arc(surface,cx,cy,r)
         self._draw_controls(surface,cx,cy,r)
         if stt_active and stt_level>0.005:
             ovl=pygame.Surface((r*2,r*2),pygame.SRCALPHA); ovl.fill((0,0,0,0))
@@ -2326,7 +2362,7 @@ class MediaPlayerMode:
             self.play(); return
         saved_path = sv["track"]
         # Restore volume / flags first (safe even if track not found)
-        self.volume  = float(sv.get("volume",  self.volume))
+        self.volume  = max(0.0, min(1.0, float(sv.get("volume",  self.volume))))
         self.shuffle = bool(sv.get("shuffle", self.shuffle))
         self.repeat  = bool(sv.get("repeat",  self.repeat))
         # Find saved track in the current list
@@ -2343,7 +2379,7 @@ class MediaPlayerMode:
             self._play_video(saved_path)   # video seek not supported, play from start
         else:
             self._play_audio(saved_path, start_pos=saved_pos)
-        self.status_msg = f"♪ {os.path.basename(saved_path)}"
+        self.status_msg = f"{os.path.splitext(os.path.basename(saved_path))[0]}"
 
     def _track_name(self) -> str:
         if not self.tracks: return "—"
@@ -2358,7 +2394,7 @@ class MediaPlayerMode:
             self.playing=True; self.paused=False
             self._position=start_pos
             self._start_t=time.time()-start_pos
-            self.status_msg=f"♪ {os.path.basename(path)}"
+            self.status_msg=f"{os.path.splitext(os.path.basename(path))[0]}"
             # Get duration in background thread so UI doesn't stall
             def _fetch_dur(p):
                 d = _get_audio_duration(p)
@@ -2822,15 +2858,10 @@ class PlaylistPanel:
             elif is_hov:
                 draw_rounded_rect_alpha(clip, pygame.Rect(2, ry, pw - 6, self.ROW_H - 2),
                     (*MEDIA_DARK, int(ai * 0.6)), radius=4)
-            # Playing indicator
-            if is_cur:
-                dot_s = self.fonts["sm"].render("▶", True, (*MEDIA_ACCENT, ai))
-                clip.blit(dot_s, (6, ry + (self.ROW_H - dot_s.get_height()) // 2))
-                txt_x = 20
-            else:
-                num_s = self.fonts["sm"].render(f"{idx+1}", True, (*TEXT_DIM, int(ai * 0.5)))
-                clip.blit(num_s, (6, ry + (self.ROW_H - num_s.get_height()) // 2))
-                txt_x = 20
+            num_col = (*MEDIA_ACCENT, ai) if is_cur else (*TEXT_DIM, int(ai * 0.5))
+            num_s = self.fonts["sm"].render(f"{idx+1}", True, num_col)
+            clip.blit(num_s, (6, ry + (self.ROW_H - num_s.get_height()) // 2))
+            txt_x = 6 + num_s.get_width() + 6
             name = os.path.splitext(os.path.basename(self._tracks[idx]))[0]
             col  = TEXT_BOLD if is_cur else (TEXT_BRIGHT if is_hov else TEXT_MID_C)
             ts   = self.fonts["sm"].render(
@@ -2856,6 +2887,12 @@ class WavePlayer:
         self.W, self.H = self.screen.get_size()
         self._is_fullscreen = False
         self.clock=pygame.time.Clock(); self.running=True
+        self._dirty = True          # force first full draw
+        self._prev_stt_level  = -1.0
+        self._prev_tts_level  = -1.0
+        self._prev_playing    = None
+        self._prev_track      = None
+        self._prev_pos_s      = -1
         self._cmd_queue: list = []   # commands dispatched from STT thread, processed on main thread
         self._cmd_lock = threading.Lock()
 
@@ -2878,7 +2915,8 @@ class WavePlayer:
         self.wave=WaveformCircle(_wave_cx, _wave_cy, _wave_r)
 
         # Media player
-        self._media=MediaPlayerMode(_wave_cx, _wave_cy, _wave_r, self.fonts, layout=ly)
+        self._media=MediaPlayerMode(_wave_cx, _wave_cy, _wave_r, self.fonts, layout=ly,
+                                on_volume_change=lambda v: self._tts.set_volume(v))
         self._media_stt_active=False
 
         # STT / TTS
@@ -3092,6 +3130,8 @@ class WavePlayer:
 
     def _reset_wake_word(self):
         """Drop back to sleeping — media ducking stops, popup dismissed."""
+        if self._wake_timer is not None:
+            self._wake_timer.cancel()
         self._wake_active  = False
         self._wake_partial = ""
         self._wake_timer   = None
@@ -3145,8 +3185,7 @@ class WavePlayer:
         if self._stt.muted:
             mc = VoskSTT.mute_command(low)
             if mc == "unmute":
-                self._set_mute(False)
-                self._tts.speak_immediate("listening")
+                with self._cmd_lock: self._cmd_queue.append("__unmute__")
             return
 
         ww = self._wake_word   # live from settings; empty = no gate
@@ -3219,6 +3258,10 @@ class WavePlayer:
 
     # ── command dispatcher ─────────────────────────────────────────────────────
     def _on_command_submit(self, text: str):
+        if text == "__unmute__":
+            self._set_mute(False)
+            self._tts.speak_immediate("listening")
+            return
         low=text.lower().strip()
         if not low: return
         print(f"[CMD] '{low}'")
@@ -3434,6 +3477,7 @@ class WavePlayer:
 
             # Events
             for ev in pygame.event.get():
+                self._dirty = True   # any event triggers a redraw
                 if ev.type==pygame.QUIT: self.running=False
                 elif ev.type==pygame.VIDEORESIZE and not self._is_fullscreen:
                     self.W, self.H = ev.w, ev.h
@@ -3556,29 +3600,30 @@ class WavePlayer:
                             rows=math.ceil(len(self.wallpaper_browser._images)/self.wallpaper_browser.COLS)
                             self.wallpaper_browser._scroll=max(0,min(rows-vr,self.wallpaper_browser._scroll-ev.y))
 
-            # Draw
-            if self.wallpaper: self.screen.blit(self.wallpaper,(0,0))
-            else: self.screen.fill(DARK_BG)
+            # ── Dirty detection — mark redraw needed when state changes ────────
+            cur_pos_s = int(self._media._position)
+            if (self.status.stt_level    != self._prev_stt_level  or
+                self.status.tts_level    != self._prev_tts_level  or
+                self._media.playing      != self._prev_playing    or
+                self._media.status_msg   != self._prev_track      or
+                cur_pos_s                != self._prev_pos_s      or
+                self._tts.speaking                                or
+                self.status.stt_level    >  0.01                  or
+                self.settings_panel._t   >  0.01                  or
+                self.playlist_panel._t   >  0.01                  or
+                self.help_panel._t       >  0.01                  or
+                self.wallpaper_browser.visible                    or
+                self.dictation.visible                            or
+                dt > 0):
+                self._dirty = True
 
-            self._media.draw(
-                self.screen, self.wave,
-                self._media_stt_active,
-                self.status.stt_level, self.status.tts_level, dt)
-            if not self._media_stt_active:
-                self.wave.draw(self.screen)
+            self._prev_stt_level = self.status.stt_level
+            self._prev_tts_level = self.status.tts_level
+            self._prev_playing   = self._media.playing
+            self._prev_track     = self._media.status_msg
+            self._prev_pos_s     = cur_pos_s
 
-            pa=self._current_panel_alpha(); ba=self._current_bar_alpha()
-            ly=self._layout
-            draw_top_bar(self.screen,    self.fonts, self.status, self.W, self.H, bar_alpha=ba, bar_h=ly["bar_h"])
-            draw_bottom_bar(self.screen, self.fonts, self.status, self.W, self.H, bar_alpha=ba, bar_h=ly["bar_h"])
-            self.settings_panel.draw(self.screen, panel_alpha=pa)
-            self.playlist_panel.draw(self.screen, panel_alpha=pa)
-            self.help_panel.draw(self.screen, panel_alpha=pa)
-            self.wallpaper_browser.draw(self.screen)
-            self.dictation.draw(self.screen)
-
-            pygame.display.flip()
-            # Yield extra CPU when idle (no animation, no audio, no open panels)
+            # ── Only redraw when dirty ────────────────────────────────────────
             _busy = (self._media.playing or
                      self._tts.speaking or
                      self.status.stt_level > 0.01 or
@@ -3587,6 +3632,31 @@ class WavePlayer:
                      self.help_panel._t > 0.01 or
                      self.wallpaper_browser.visible or
                      self.dictation.visible)
+
+            if self._dirty:
+                if self.wallpaper: self.screen.blit(self.wallpaper,(0,0))
+                else: self.screen.fill(DARK_BG)
+
+                self._media.draw(
+                    self.screen, self.wave,
+                    self._media_stt_active,
+                    self.status.stt_level, self.status.tts_level, dt)
+                if not self._media_stt_active:
+                    self.wave.draw(self.screen)
+
+                pa=self._current_panel_alpha(); ba=self._current_bar_alpha()
+                ly=self._layout
+                draw_top_bar(self.screen,    self.fonts, self.status, self.W, self.H, bar_alpha=ba, bar_h=ly["bar_h"])
+                draw_bottom_bar(self.screen, self.fonts, self.status, self.W, self.H, bar_alpha=ba, bar_h=ly["bar_h"])
+                self.settings_panel.draw(self.screen, panel_alpha=pa)
+                self.playlist_panel.draw(self.screen, panel_alpha=pa)
+                self.help_panel.draw(self.screen, panel_alpha=pa)
+                self.wallpaper_browser.draw(self.screen)
+                self.dictation.draw(self.screen)
+
+                pygame.display.flip()
+                self._dirty = False
+
             self.clock.tick(self.TARGET_FPS if _busy else 10)
 
         # Persist playback state so we can resume next time
