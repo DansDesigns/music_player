@@ -5,7 +5,7 @@ Universal Desktop Voice-Controlled Media Player,
 * use "Mic Threashold" on settings panel to change to trigger level for STT
 * set a custom wakeword in the Settings Panel:
 
-* 
+
 ![](https://github.com/DansDesigns/music_player/blob/main/Screenshot%202026-06-03%20000430.png)
 
 
