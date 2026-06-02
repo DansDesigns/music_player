@@ -1,6 +1,6 @@
 # WavePlayer - v1.0.0
 Universal Desktop Voice-Controlled Media Player,
-!(https://github.com/DansDesigns/music_player/blob/main/Screenshot%202026-06-03%20000443.png)
+![](https://github.com/DansDesigns/music_player/blob/main/Screenshot%202026-06-03%20000443.png)
 * recomended to have wallpapers in a ```wallpapers``` folder in ```/Home/Pictures/``` on Linux, or in ```User\Pictures\``` on Windows 
 * use "Mic Threashold" on settings panel to change to trigger level for STT
 * set a custom wakeword in the Settings Panel
