@@ -4,7 +4,11 @@ Universal Desktop Voice-Controlled Media Player,
 * recomended to have wallpapers in a ```wallpapers``` folder in ```/Home/Pictures/``` on Linux, or in ```User\Pictures\``` on Windows 
 * use "Mic Threashold" on settings panel to change to trigger level for STT
 * set a custom wakeword in the Settings Panel:
+
+* 
 ![](https://github.com/DansDesigns/music_player/blob/main/Screenshot%202026-06-03%20000430.png)
+
+
 Install Linux:
 ```
 chmod +x install_music_player.sh
