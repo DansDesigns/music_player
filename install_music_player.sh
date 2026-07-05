@@ -204,4 +204,4 @@ echo " To run it directly:  $RUN_SCRIPT"
 echo "=============================="
 echo ""
 
-exec "$RUN_SCRIPT"
+#exec "$RUN_SCRIPT"
