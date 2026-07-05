@@ -219,5 +219,3 @@ echo  Installation complete!
 echo  WavePlayer is in your Start Menu and on the Desktop.
 echo ==============================
 echo.
-
-call "%TARGET%"

@@ -200,7 +200,7 @@ echo "=============================="
 echo " Installation complete!"
 echo ""
 echo " WavePlayer will appear in your application launcher."
-echo " To run it directly:  $RUN_SCRIPT"
+#echo " To run it directly:  $RUN_SCRIPT"
 echo "=============================="
 echo ""
 
